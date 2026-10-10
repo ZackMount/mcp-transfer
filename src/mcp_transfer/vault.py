@@ -78,9 +78,13 @@ def secure_windows_directory(path: Path):
                 "/grant:r",
                 f"{identity}:(OI)(CI)F",
                 "SYSTEM:(OI)(CI)F",
-                "/T",
                 "/Q",
             ],
             check=True,
             capture_output=True,
         )
+        # Only protect the directory's DACL. Applying /inheritance:r recursively
+        # removes inherited access from files as well. Reset descendants to the
+        # now-private parent ACL, including files created before enrollment.
+        for child in path.iterdir():
+            subprocess.run(["icacls", str(child), "/reset", "/T", "/Q"], check=True, capture_output=True)

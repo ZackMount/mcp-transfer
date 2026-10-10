@@ -18,8 +18,12 @@ if (-not (Test-Path $Python)) {
 if (-not (Test-Path $Python)) { throw 'Python 3.12 was not found in its per-user installation directory.' }
 New-Item -ItemType Directory -Force -Path $InstallRoot, $DataRoot | Out-Null
 $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
-& icacls $InstallRoot /inheritance:r /grant:r "${Identity}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' /T /Q | Out-Null
+& icacls $InstallRoot /inheritance:r /grant:r "${Identity}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict installation directory permissions.' }
+foreach ($Item in Get-ChildItem -Force -LiteralPath $InstallRoot) {
+    & icacls $Item.FullName /reset /T /Q | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot propagate private installation permissions.' }
+}
 $TaskName = "MCPTransfer-$Role"
 $ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($ExistingTask) { Stop-ScheduledTask -TaskName $TaskName; Start-Sleep -Seconds 2 }

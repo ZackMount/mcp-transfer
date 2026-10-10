@@ -12,6 +12,7 @@ import httpx2
 import pytest
 import uvicorn
 from mcp import Client
+from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.exceptions import MCPError
 
@@ -179,6 +180,25 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
                                 assert [tool.name for tool in listed.tools] == ["add"]
                                 result = await mcp.call_tool("add", {"a": 20, "b": 22})
                                 assert "42" in result.model_dump_json()
+                                # Exercise the exact executable bridge used by exported application configs.
+                                await agent.tick()
+                                params = StdioServerParameters(
+                                    command=sys.executable,
+                                    args=[
+                                        "-m",
+                                        "mcp_transfer",
+                                        "--home",
+                                        str(client_settings.home),
+                                        "connect",
+                                        "--server",
+                                        "srv_demo",
+                                    ],
+                                )
+                                async with Client(params, cache=None, mode=mode) as bridged:
+                                    bridge_tools = await bridged.list_tools()
+                                    assert [tool.name for tool in bridge_tools.tools] == ["add"]
+                                    bridge_result = await bridged.call_tool("add", {"a": 19, "b": 23})
+                                    assert "42" in bridge_result.model_dump_json()
                                 assert (
                                     await admin.post(
                                         f"/api/devices/{client_settings.data['device_id']}/revoke"
