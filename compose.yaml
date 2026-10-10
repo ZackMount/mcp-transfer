@@ -20,7 +20,16 @@ services:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
   cloud:
-    build: .
+    build:
+      context: .
+      network: host
+      args:
+        HTTP_PROXY: ${MCPT_BUILD_PROXY:-}
+        HTTPS_PROXY: ${MCPT_BUILD_PROXY:-}
+        http_proxy: ${MCPT_BUILD_PROXY:-}
+        https_proxy: ${MCPT_BUILD_PROXY:-}
+        NO_PROXY: localhost,127.0.0.1,::1
+        PIP_INDEX_URL: ${MCPT_PIP_INDEX_URL:-https://pypi.org/simple}
     restart: unless-stopped
     network_mode: host
     environment:

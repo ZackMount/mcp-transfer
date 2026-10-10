@@ -85,33 +85,21 @@ class Agent:
 
     async def enroll(
         self, cloud_url: str, code: str, name: str, development=False, allow_insecure_http=False,
-        replace_client=False,
+        replace_existing=False,
     ):
-        recovering = str(code).count(".") == 2
-        if self.settings.data.get("device_id") and not recovering and not (replace_client and self.role == "client"):
+        if self.settings.data.get("device_id") and not replace_existing:
             raise ValueError(
                 "Device already enrolled. Revoke it in the cloud and use a new profile to re-enroll."
             )
         cloud_url = validate_cloud_url(cloud_url, development, allow_insecure_http)
-        if recovering and self.settings.data.get("signing_public_key"):
-            try:
-                claims = verify_token(code, self.settings.data["signing_public_key"], cloud_url, "device-recovery")
-            except HTTPException as error:
-                raise ValueError("恢复码无效或已过期，请在云端该设备行重新生成。") from error
-            if claims.get("kind") != "recover" or claims.get("role") != self.role:
-                raise ValueError("恢复码的设备角色不匹配。")
         payload = {"code": code, "name": name, "role": self.role}
-        if recovering and cloud_url == self.settings.data.get("cloud_url"):
-            payload["old_refresh_token"] = self.vault.read().get("refresh_token", "")
         with tempfile.TemporaryDirectory(prefix=".enroll-", dir=self.settings.home) as temporary:
             staged = Path(temporary)
             if self.role == "host":
                 payload["csr"] = make_csr(staged, "pending-host")
-            endpoint = "/api/devices/recover" if recovering else "/api/devices/enroll"
+            endpoint = "/api/devices/enroll"
             async with self.cloud_http() as client:
                 response = await client.post(cloud_url + endpoint, json=payload, timeout=20)
-                if recovering and response.status_code == 404:
-                    raise ValueError("云端尚不支持设备恢复，请先更新云端到最新版本。")
                 response.raise_for_status()
                 result = response.json()
             if result["role"] != self.role:
@@ -155,18 +143,7 @@ class Agent:
         return await self.reconnect(cloud_url, code, name, allow_insecure_http)
 
     async def reconnect(self, cloud_url: str, code: str, name: str, allow_insecure_http=False):
-        recovering = str(code).count(".") == 2
-        if self.role == "host" and not recovering:
-            raise ValueError("请在云端这台主机的设备行生成恢复码，以保留已发布服务和授权。")
         async with self.connection_lock:
-            if not recovering and self.settings.data.get("device_id") and self.vault.read().get("refresh_token"):
-                try:
-                    await self.api("GET", "/api/catalog")
-                except httpx.HTTPStatusError as error:
-                    if error.response.status_code not in {401, 403}:
-                        raise
-                else:
-                    raise ValueError("现有设备登记仍然有效。若要更换登记，请先在云端撤销旧客户端。")
             async with self.refresh_lock:
                 # A failed code exchange leaves the existing profile intact.
                 # No new credentials can race a background refresh during replacement.
@@ -175,12 +152,19 @@ class Agent:
                 try:
                     await self.enroll(
                         cloud_url, code, name, bool(self.settings.data.get("development")),
-                        allow_insecure_http, replace_client=True,
+                        allow_insecure_http, replace_existing=True,
                     )
                 except Exception:
                     if self.frp is not None and not self.settings.data.get("disable_frp", False):
                         await self.frp.start()
                     raise
+                if self.role == "host":
+                    services = self.vault.read().get("services", {})
+                    self.vault.update(services={new_id("srv"): definition for definition in services.values()})
+                else:
+                    self.vault.update(mappings={})
+                    self.settings.data["subscribe_all"] = True
+                    self.settings.save()
                 for actor in list(self.actors.values()):
                     await actor.close()
                 self.actors.clear()
@@ -205,9 +189,9 @@ class Agent:
                         await asyncio.sleep(1)
                 if not self.tunnel_ready:
                     return {"ok": True, "synced": True, "tunnel_ready": False,
-                            "message": "登记已恢复，但主机隧道尚未就绪。请检查 frpc.log 与云端状态，再检测工具。"}
+                            "message": "已重新登记，但主机隧道尚未就绪。请检查 frpc.log 与云端状态，再检测工具。"}
             return {"ok": True, "synced": True, "tunnel_ready": self.tunnel_ready,
-                    "message": "已恢复登记并同步，本机服务、映射和导出设置已保留。"}
+                    "message": "已重新登记并同步，本机 MCP 启动配置已保留，服务目录已重新生成。"}
 
     async def cloud_access(self):
         async with self.refresh_lock:

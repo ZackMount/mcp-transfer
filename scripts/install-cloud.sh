@@ -3,13 +3,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-DOMAIN=""; PUBLIC_URL=""; FRP_PORT=""; ALLOW_HTTP=""; MIGRATE=0; PRINT_CONFIG=0; DOWNLOAD_PROXY=""
+DOMAIN=""; PUBLIC_URL=""; FRP_PORT=""; ALLOW_HTTP=""; MIGRATE=0; PRINT_CONFIG=0; DOWNLOAD_PROXY=""; PIP_INDEX_URL="https://pypi.org/simple"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --domain) DOMAIN="${2:?--domain needs a domain}"; shift 2 ;;
     --public-url) PUBLIC_URL="${2:?--public-url needs a URL}"; shift 2 ;;
     --frp-port) FRP_PORT="${2:?--frp-port needs a port}"; shift 2 ;;
     --download-proxy) DOWNLOAD_PROXY="${2:?--download-proxy needs an HTTP(S) proxy URL}"; shift 2 ;;
+    --pip-index-url) PIP_INDEX_URL="${2:?--pip-index-url needs an HTTPS index URL}"; shift 2 ;;
     --allow-insecure-http) ALLOW_HTTP=1; shift ;;
     --migrate-origin) MIGRATE=1; shift ;;
     --print-config) PRINT_CONFIG=1; shift ;;
@@ -17,13 +18,17 @@ while [[ $# -gt 0 ]]; do
       printf 'Usage: sudo bash scripts/install-cloud.sh [--domain NAME | --public-url URL] [--frp-port PORT] [--allow-insecure-http] [--migrate-origin]\n'
       printf 'HTTP example: --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http\n'
       printf 'Changing an existing public URL requires --migrate-origin; update both agents afterwards.\n'
-      printf 'Use --download-proxy http://127.0.0.1:17897 for a temporary frps download proxy; it is not saved. Docker image downloads need their own daemon proxy.\n'
+      printf 'Use --download-proxy http://127.0.0.1:17897 for temporary source, build and frps downloads; it is not saved. Docker image pulls need their own daemon proxy.\n'
+      printf 'Use --pip-index-url https://pypi.org/simple to choose the build package index.\n'
       exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
 if [[ -n "$DOWNLOAD_PROXY" && ! "$DOWNLOAD_PROXY" =~ ^https?://[^[:space:]]+$ ]]; then
   printf 'Download proxy must be an HTTP(S) URL without whitespace.\n' >&2; exit 2
+fi
+if [[ ! "$PIP_INDEX_URL" =~ ^https://[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]{1,5})?/[a-zA-Z0-9/_~.-]+/?$ ]]; then
+  printf 'Package index must be an HTTPS URL without credentials or query parameters.\n' >&2; exit 2
 fi
 read_env() { if [[ -f .env ]]; then sed -n "s/^$1=//p" .env | tail -1; fi; }
 OLD_URL="$(read_env MCPT_PUBLIC_URL)"
@@ -93,7 +98,7 @@ update_env MCPT_ALLOW_INSECURE_HTTP "$ALLOW_HTTP"
 mkdir -p data/cloud
 chown 10001:10001 data/cloud
 chmod 700 data/cloud
-docker compose build --pull cloud
+MCPT_BUILD_PROXY="$DOWNLOAD_PROXY" MCPT_PIP_INDEX_URL="$PIP_INDEX_URL" docker compose build --pull cloud
 docker compose up -d --wait postgres
 if [[ "$ORIGIN_CHANGED" == 1 ]]; then docker compose stop cloud caddy; fi
 INIT_ARGS=(cloud-init --public-url "$PUBLIC_URL" --frp-port "$FRP_PORT")

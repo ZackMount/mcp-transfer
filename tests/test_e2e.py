@@ -319,7 +319,8 @@ async def test_running_host_recovers_through_webui_with_its_services_and_tls_ada
                     await client.tick()
                     client.subscribe(["srv_runtime"])
                     assert (await admin.post(f"/api/devices/{old_id}/revoke")).status_code == 200
-                    code = (await admin.post(f"/api/devices/{old_id}/recovery-code")).json()["code"]
+                    assert (await admin.delete(f"/api/devices/{old_id}")).status_code == 200
+                    code = (await admin.post("/api/enrollment-codes", json={"role": "host"})).json()["code"]
                     result = await local.post("/api/reconnect", json={
                         "cloud_url": public, "code": code, "name": "恢复主机", "allow_insecure_http": True,
                     })
@@ -329,11 +330,13 @@ async def test_running_host_recovers_through_webui_with_its_services_and_tls_ada
                     new_id = Settings(host_settings.home).data["device_id"]
                     assert new_id != old_id
                     server = (await admin.get("/api/servers")).json()[0]
-                    assert server["id"] == "srv_runtime" and server["host_id"] == new_id
+                    new_sid = server["id"]
+                    assert new_sid != "srv_runtime" and server["host_id"] == new_id
+                    client.settings.data["subscribe_all"] = True
                     await client.tick()
                     async with serve(create_agent_app(client, background=False), client_port):
-                        token = client.vault.read()["mappings"]["srv_runtime"]["token"]
-                        async with mapped_client(client_port, "srv_runtime", token) as peer:
+                        token = client.vault.read()["mappings"][new_sid]["token"]
+                        async with mapped_client(client_port, new_sid, token) as peer:
                             assert [tool.name for tool in (await peer.list_tools()).tools] == ["add"]
                             assert "42" in (await peer.call_tool("add", {"a": 20, "b": 22})).model_dump_json()
     finally:

@@ -22,7 +22,6 @@ async def test_revoked_client_can_reenroll_without_losing_local_mappings(cloud, 
     agent = await registered_client(cloud, tmp_path)
     old_id = agent.settings.data["device_id"]
     old_password = agent.vault.read()["local_password"]
-    old_mappings = agent.vault.read()["mappings"]
     agent.resource_tokens["srv_kept"] = ("old-resource-token", 9999999999)
     assert admin.post(f"/api/devices/{old_id}/revoke").status_code == 200
     code = admin.post("/api/enrollment-codes", json={"role": "client"}).json()["code"]
@@ -30,7 +29,7 @@ async def test_revoked_client_can_reenroll_without_losing_local_mappings(cloud, 
     assert result["synced"] is True
     assert agent.settings.data["device_id"] != old_id
     assert agent.settings.data["name"] == "Recovered"
-    assert agent.vault.read()["mappings"] == old_mappings
+    assert agent.vault.read()["mappings"] == {}
     assert agent.vault.read()["local_password"] == old_password
     assert not agent.resource_tokens
     assert agent.frp is None
@@ -63,24 +62,9 @@ async def test_recovery_works_when_local_refresh_credential_is_missing(cloud, tm
     agent.access = ""
     code = admin.post("/api/enrollment-codes", json={"role": "client"}).json()["code"]
     assert (await agent.reconnect_client("https://testserver", code, "Recovered"))["synced"] is True
-    assert agent.vault.read()["mappings"]["srv_kept"]["token"] == "local-token"
+    assert agent.vault.read()["mappings"] == {}
     await agent.close()
 
-
-async def test_live_registration_is_not_silently_replaced(cloud, tmp_path):
-    admin, app, _ = cloud
-    agent = await registered_client(cloud, tmp_path / "old")
-    old_id = agent.settings.data["device_id"]
-    code = admin.post("/api/enrollment-codes", json={"role": "client"}).json()["code"]
-    with pytest.raises(ValueError, match="仍然有效"):
-        await agent.reconnect_client("https://testserver", code, "Replacement")
-    assert agent.settings.data["device_id"] == old_id
-    # Rejection happens before the new code is consumed.
-    fresh = Agent(Settings(tmp_path / "new"), "client")
-    fresh.cloud_http = lambda: httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
-    await fresh.enroll("https://testserver", code, "Fresh")
-    await fresh.close()
-    await agent.close()
 
 
 def test_recovery_api_requires_local_auth_and_csrf(tmp_path):

@@ -82,8 +82,8 @@ async function overview(main) {
     if (!status.device_id) main.append(form("首次连接云端", [input("云端地址", "cloud_url", "url", "", "例如 https://mcp.example.com"), input("设备名称", "name", "text", state.role === "host" ? "我的 MCP 主机" : "我的工作电脑"), input("一次性接入码", "code", "password"), check("允许明文 HTTP（密码、Token 和调用内容没有传输加密）", "allow_insecure_http", status.allow_insecure_http)], "连接并登记", async data => { data.allow_insecure_http = data.allow_insecure_http === "on"; await api("/api/configure", "POST", data); toast("设备已登记"); await render(); }));
     else main.append(panel(state.role === "host" ? "发布你的 MCP 服务" : "把远程服务带到本机", el("p", {}, state.role === "host" ? "在 MCP 服务页添加 HTTP、stdio 或旧 SSE 服务。stdio 测试会启动配置的程序，导入的服务默认停用。" : "同步已授权目录后，可以一次订阅全部服务，生成应用配置。云端令牌由后台管理，不必填入 AI 应用。"), action(state.role === "host" ? "添加服务" : "查看可用服务", () => navigate("servers"), "primary")));
     if (status.device_id) {
-      main.append(panel("恢复设备接入", el("p", {}, "在云端“设备与接入”找到这台设备，点击“生成恢复码”。恢复会替换旧凭证并停止当前连接，保留本机服务、映射和导出设置；主机的服务 ID 和服务授权会迁移到恢复后的设备。"),
-        form("输入设备恢复码", [input("云端地址", "cloud_url", "url", status.cloud_url || ""), input("设备名称", "name", "text", status.name || (state.role === "host" ? "我的 MCP 主机" : "我的工作电脑")), input("一次性恢复码", "code", "password"), check("允许明文 HTTP", "allow_insecure_http", status.allow_insecure_http)], "恢复接入并同步", async data => {
+      main.append(panel("重新登记", el("p", {}, "先在云端删除旧设备，再生成普通接入码。这里可以直接重新登记；主机保留本机 MCP 启动配置并重新发布服务，客户端重新同步服务目录。"),
+        form("使用普通接入码", [input("云端地址", "cloud_url", "url", status.cloud_url || ""), input("设备名称", "name", "text", status.name || (state.role === "host" ? "我的 MCP 主机" : "我的工作电脑")), input("一次性接入码", "code", "password"), check("允许明文 HTTP", "allow_insecure_http", status.allow_insecure_http)], "重新登记并同步", async data => {
           data.allow_insecure_http = data.allow_insecure_http === "on";
           const result = await api("/api/reconnect", "POST", data); toast(result.message); await render();
         })));
@@ -151,12 +151,15 @@ async function devicesPage(main) {
     node.querySelector(".generated")?.remove();
     node.append(el("div", { class: "generated message" }, el("p", {}, "5 分钟内有效，仅可使用一次。请在对应角色的本地 WebUI 中登记。"), el("pre", {}, result.code), action("复制接入码", async () => { await navigator.clipboard.writeText(result.code); toast("已复制"); })));
   }));
-  const recoveryBox = el("div");
-  main.append(table(["设备", "角色", "所属用户", "状态", "操作"], devices.map(x => [el("div", {}, x.name, el("div", { class: "small muted" }, x.id)), x.role, users.find(u => u.id === x.owner)?.username || x.owner, badge(x.recovered_by ? "已恢复为新设备" : !x.active ? "已撤销" : x.online ? "在线" : "离线", x.active && x.online), el("div", { class: "row actions" }, x.recovered_by ? el("span", { class: "small break" }, `当前设备：${x.recovered_by}`) : action("生成恢复码", async () => {
-    const result = await api(`/api/devices/${x.id}/recovery-code`, "POST", {});
-    recoveryBox.replaceChildren(panel(`恢复 ${result.name}`, el("p", {}, "5 分钟有效、仅使用一次、绑定这台设备及其所属用户。将恢复码填到原设备 WebUI 的“恢复设备接入”。恢复成功后旧凭证失效，主机服务 ID 与服务授权保留。"), el("pre", { class: "break" }, result.code), action("复制恢复码", async () => { await navigator.clipboard.writeText(result.code); toast("已复制"); })));
-    recoveryBox.scrollIntoView({ behavior: "smooth" });
-  }), x.active ? action("撤销设备", async () => { if (!confirm(`撤销“${x.name}”的访问权限？已有流也会被关闭。`)) return; await api(`/api/devices/${x.id}/revoke`, "POST", {}); await render(); }, "danger") : null)])), recoveryBox);
+  main.append(action("清理所有已撤销设备", async () => {
+    if (!confirm("删除所有已撤销设备及其云端服务和授权？本机 MCP 启动配置保留。")) return;
+    const result = await api("/api/devices/cleanup", "POST", {}); toast(`已删除 ${result.devices} 台旧设备`); await render();
+  }, "danger"));
+  main.append(table(["设备", "角色", "所属用户", "状态", "操作"], devices.map(x => [el("div", {}, x.name, el("div", { class: "small muted" }, x.id)), x.role, users.find(u => u.id === x.owner)?.username || x.owner, badge(!x.active ? "已撤销" : x.online ? "在线" : "离线", x.active && x.online), action("删除", async () => {
+    if (!confirm(`删除“${x.name}”及其云端服务和授权？删除后可用普通接入码重新登记。`)) return;
+    await api(`/api/devices/${x.id}`, "DELETE"); toast("旧设备已删除"); await render();
+  }, "danger")])));
+
 }
 
 async function grantsPage(main) {

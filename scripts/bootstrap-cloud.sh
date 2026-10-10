@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # Public download bootstrap. No GitHub account or Git is needed for a new install.
 set -euo pipefail
-INSTALL_DIR=""; PREPARE_ONLY=0; INSTALL_ARGS=()
+INSTALL_DIR=""; PREPARE_ONLY=0; INSTALL_ARGS=(); DOWNLOAD_PROXY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir) INSTALL_DIR="${2:?--install-dir needs a directory}"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
+    --download-proxy) DOWNLOAD_PROXY="${2:?--download-proxy needs a URL}"; INSTALL_ARGS+=("--download-proxy" "$DOWNLOAD_PROXY"); shift 2 ;;
     *) INSTALL_ARGS+=("$1"); shift ;;
   esac
 done
+if [[ -n "$DOWNLOAD_PROXY" && ! "$DOWNLOAD_PROXY" =~ ^https?://[^[:space:]]+$ ]]; then
+  printf 'Download proxy must be an HTTP(S) URL without whitespace.\n' >&2; exit 2
+fi
 if [[ "$PREPARE_ONLY" != 1 && ( "$(uname -s)" != Linux || $EUID -ne 0 ) ]]; then
   printf 'Run on Linux through sudo bash.\n' >&2; exit 1
 fi
@@ -66,12 +70,15 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
       fi
     fi
   fi
+  if [[ -n "$DOWNLOAD_PROXY" ]]; then GIT_RUN+=(-c "http.proxy=$DOWNLOAD_PROXY"); fi
   "${GIT_RUN[@]}" -c credential.helper= fetch https://github.com/ZackMount/mcp-transfer.git main
   "${GIT_RUN[@]}" merge --ff-only FETCH_HEAD
 else
   STAGING="$(mktemp -d)"
   trap 'rm -rf -- "$STAGING"' EXIT
-  curl --fail --show-error --silent --location --retry 3 https://codeload.github.com/ZackMount/mcp-transfer/tar.gz/refs/heads/main -o "$STAGING/source.tar.gz"
+  CURL_ARGS=(--fail --show-error --silent --location --retry 3)
+  if [[ -n "$DOWNLOAD_PROXY" ]]; then CURL_ARGS+=(--proxy "$DOWNLOAD_PROXY"); fi
+  curl "${CURL_ARGS[@]}" https://codeload.github.com/ZackMount/mcp-transfer/tar.gz/refs/heads/main -o "$STAGING/source.tar.gz"
   mkdir "$STAGING/source"
   tar -xzf "$STAGING/source.tar.gz" --strip-components=1 -C "$STAGING/source"
   [[ -f "$STAGING/source/pyproject.toml" && -f "$STAGING/source/scripts/install-cloud.sh" ]] || { printf 'Invalid source archive.\n' >&2; exit 1; }

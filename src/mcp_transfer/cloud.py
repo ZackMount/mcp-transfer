@@ -17,7 +17,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, or_, select, update
-from sqlalchemy.exc import IntegrityError
 
 from . import __version__
 from .config import Settings, validate_cloud_url
@@ -330,7 +329,7 @@ def create_cloud(settings: Settings) -> FastAPI:
         rate.check("enroll:" + client_ip(request), 10)
         body = json.loads(await limited_body(request, 16384))
         if str(body.get("code", "")).count(".") == 2:
-            raise HTTPException(400, "Use the device recovery endpoint for recovery codes")
+            raise HTTPException(400, "请生成普通的一次性接入码")
         refresh = secrets.token_urlsafe(40)
         frp_secret = secrets.token_urlsafe(40)
         certificate = None
@@ -381,114 +380,6 @@ def create_cloud(settings: Settings) -> FastAPI:
             "frp_secret": frp_secret if device.role == "host" else None,
             "frp_server": origin.hostname,
             "frp_port": settings.frp_port,
-        }
-
-    @app.post("/api/devices/{did}/recovery-code")
-    async def recovery_code(did: str, request: Request):
-        actor = user_session(request)
-        with db.begin() as session:
-            device = session.get(Device, did)
-            if not device or (device.owner != actor.id and not actor.admin):
-                raise HTTPException(404, "Device not found")
-            if session.get(Audit, "recover_" + did):
-                raise HTTPException(409, "This device was already recovered; select its replacement")
-            owner = session.get(User, device.owner)
-            if not owner or not owner.active:
-                raise HTTPException(403, "Owner disabled")
-            code = signer.issue(
-                device.id, "device-recovery", ttl=300, kind="recover",
-                uid=device.owner, role=device.role, actor=actor.id,
-            )
-            session.add(Invite(hash=digest(code), owner=device.owner, role=device.role, expires=time.time() + 300))
-            role, name = device.role, device.name
-        log(actor.id, "recovery_code_created", did)
-        return {"code": code, "expires_in": 300, "role": role, "name": name}
-
-    @app.post("/api/devices/recover")
-    async def recover_device(request: Request):
-        rate.check("enroll:" + client_ip(request), 10)
-        body = json.loads(await limited_body(request, 16384))
-        value = str(body.get("code", ""))
-        claims = signer.verify(value, "device-recovery")
-        if claims.get("kind") != "recover":
-            raise HTTPException(401, "Device recovery code required")
-        refresh, frp_secret = secrets.token_urlsafe(40), secrets.token_urlsafe(40)
-        certificate = None
-        try:
-            with db.begin() as session:
-                old = session.scalar(select(Device).where(Device.id == claims["sub"]).with_for_update())
-                invite = session.get(Invite, digest(value))
-                actor = session.get(User, claims.get("actor", ""))
-                owner = session.get(User, claims.get("uid", ""))
-                if (not old or not invite or invite.used or invite.expires < time.time()
-                        or invite.owner != old.owner or invite.role != old.role
-                        or claims.get("uid") != old.owner or claims.get("role") != old.role):
-                    raise HTTPException(401, "Recovery code expired, used or mismatched")
-                if not actor or not actor.active or (actor.id != old.owner and not actor.admin):
-                    raise HTTPException(403, "Recovery issuer unavailable")
-                if not owner or not owner.active:
-                    raise HTTPException(403, "Owner disabled")
-                if body.get("role") != old.role:
-                    raise HTTPException(403, "Recovery code role does not match this agent")
-                if session.get(Audit, "recover_" + old.id):
-                    raise HTTPException(409, "Device already recovered; select its replacement")
-                new = Device(
-                    id=new_id("d"), owner=old.owner, role=old.role,
-                    name=str(body.get("name") or old.name)[:128], refresh_hash=digest(refresh),
-                    refresh_expires=time.time() + 30 * 86400,
-                    frp_secret=digest(frp_secret) if old.role == "host" else None,
-                )
-                if old.role == "host":
-                    csr = body.get("csr", "")
-                    if not isinstance(csr, str):
-                        raise HTTPException(400, "Invalid host CSR")
-                    try:
-                        certificate = pki.sign_csr(csr, new.id, [f"{new.id}.mcp.internal"])
-                    except (ValueError, TypeError) as error:
-                        raise HTTPException(400, "Invalid host CSR") from error
-                    new.port = old.port
-                    if new.port is None:
-                        used = set(session.scalars(select(Device.port).where(Device.port.is_not(None))))
-                        new.port = next((p for p in range(21000, 22000) if p not in used), None)
-                    if new.port is None:
-                        raise HTTPException(409, "Host capacity reached")
-                proof = str(body.get("old_refresh_token") or "")
-                proof_hash = digest(proof) if proof else ""
-                consumed = session.get(ConsumedRefresh, proof_hash) if proof_hash else None
-                owns_old_credentials = bool(proof and (
-                    proof_hash in {old.refresh_hash, old.previous_refresh}
-                    or (consumed and consumed.device_id == old.id)
-                ))
-                moved_grants = 0
-                if old.role == "client" and (actor.admin or owns_old_credentials):
-                    moved_grants = session.execute(update(Grant).where(
-                        Grant.device_id == old.id, Grant.user_id == old.owner
-                    ).values(device_id=new.id)).rowcount
-                consumed_code = session.execute(update(Invite).where(
-                    Invite.hash == invite.hash, Invite.used.is_(False), Invite.expires > time.time()
-                ).values(used=True))
-                if consumed_code.rowcount != 1:
-                    raise HTTPException(401, "Recovery code already used")
-                old.active = False
-                old.port = None
-                session.flush()  # Release the unique port before inserting its replacement.
-                session.add(new)
-                moved_services = session.execute(update(Service).where(
-                    Service.host_id == old.id
-                ).values(host_id=new.id)).rowcount if old.role == "host" else 0
-                session.add(Audit(
-                    id="recover_" + old.id, actor=actor.id, action="device_recovered",
-                    target=old.id, status=new.id,
-                ))
-        except IntegrityError as error:
-            raise HTTPException(409, "Device recovery conflicted; select the current device") from error
-        return {
-            "device_id": new.id, "role": new.role, "refresh_token": refresh,
-            "ca": pki.ca, "certificate": certificate, "signing_public_key": signer.public_pem,
-            "remote_port": new.port, "frp_secret": frp_secret if new.role == "host" else None,
-            "frp_server": origin.hostname, "frp_port": settings.frp_port,
-            "recovered_from": old.id, "services_preserved": moved_services,
-            "device_grants_restored": moved_grants,
         }
 
     def refresh_device(refresh: str, resource: str | None = None, request_id: str | None = None):
@@ -603,7 +494,6 @@ def create_cloud(settings: Settings) -> FastAPI:
                     "active": d.active,
                     "online": d.last_seen > time.time() - 40,
                     "last_seen": d.last_seen,
-                    "recovered_by": marker.status if (marker := session.get(Audit, "recover_" + d.id)) else "",
                 }
                 for d in session.scalars(query)
             ]
@@ -618,6 +508,39 @@ def create_cloud(settings: Settings) -> FastAPI:
             device.active = False
         log(user.id, "device_revoked", did)
         return {"ok": True}
+
+    def remove_devices(session, ids):
+        server_ids = list(session.scalars(select(Service.id).where(Service.host_id.in_(ids))))
+        session.execute(delete(Grant).where(or_(Grant.device_id.in_(ids), Grant.server_id.in_(server_ids))))
+        session.execute(delete(Service).where(Service.id.in_(server_ids)))
+        session.execute(delete(ConsumedRefresh).where(ConsumedRefresh.device_id.in_(ids)))
+        session.execute(delete(Device).where(Device.id.in_(ids)))
+        for key in list(sessions):
+            if key[0] in server_ids or sessions[key][1] in ids:
+                sessions.pop(key, None)
+        return {"devices": len(ids), "servers": len(server_ids)}
+
+    @app.delete("/api/devices/{did}")
+    async def delete_device(did: str, request: Request):
+        actor = user_session(request)
+        with db.begin() as session:
+            device = session.get(Device, did)
+            if not device or (device.owner != actor.id and not actor.admin):
+                raise HTTPException(404, "Device not found")
+            result = remove_devices(session, [did])
+        log(actor.id, "device_deleted", did)
+        return result
+
+    @app.post("/api/devices/cleanup")
+    async def cleanup_devices(request: Request):
+        actor = user_session(request)
+        with db.begin() as session:
+            query = select(Device.id).where(Device.active.is_(False))
+            if not actor.admin:
+                query = query.where(Device.owner == actor.id)
+            result = remove_devices(session, list(session.scalars(query)))
+        log(actor.id, "inactive_devices_deleted", status=str(result["devices"]))
+        return result
 
     @app.get("/api/hosts/me/ready")
     async def host_ready(request: Request):
