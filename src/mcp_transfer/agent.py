@@ -17,7 +17,6 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .config import Settings, atomic_write, validate_cloud_url
 from .exporters import TARGETS, application_paths, export_preview, write_export
-from .frp import FrpProcess, write_frpc
 from .http_support import REQUEST_HEADERS, relay_response
 from .pki import make_csr
 from .policy import authorize_message, parse_message
@@ -51,7 +50,17 @@ class Agent:
         self.catalog = []
         self.synced_at = 0.0
         self.status = "未连接云端"
-        self.frp = FrpProcess(settings, "frpc")
+        self.frp = None
+        if role == "host":
+            from .frp import FrpProcess
+
+            self.frp = FrpProcess(settings, "frpc")
+        elif role == "client":
+            fields = {"frp_server", "frp_port", "remote_port"} & self.settings.data.keys()
+            if fields:
+                for field in fields:
+                    self.settings.data.pop(field)
+                self.settings.save()
         self.actors: dict[tuple, Actor] = {}
         self.used_tickets = {}
         self.published = {}
@@ -88,19 +97,20 @@ class Agent:
             result = response.json()
         if result["role"] != self.role:
             raise ValueError("Enrollment code role does not match this agent")
-        self.vault.update(refresh_token=result["refresh_token"], frp_secret=result.get("frp_secret"))
-        self.settings.data.update(
-            {
-                k: result[k]
-                for k in ("device_id", "role", "remote_port", "frp_server", "frp_port", "signing_public_key")
-            }
-        )
+        self.vault.update(refresh_token=result["refresh_token"])
+        fields = ["device_id", "role", "signing_public_key"]
+        if self.role == "host":
+            self.vault.update(frp_secret=result["frp_secret"])
+            fields.extend(["remote_port", "frp_server", "frp_port"])
+        self.settings.data.update({field: result[field] for field in fields})
         self.settings.data.update(
             cloud_url=cloud_url, name=name, development=development, allow_insecure_http=allow_insecure_http
         )
         self.settings.save()
-        atomic_write(self.settings.home / "ca.crt", result["ca"])
-        if result.get("certificate"):
+        if self.role == "host" and result.get("certificate"):
+            from .frp import write_frpc
+
+            atomic_write(self.settings.home / "ca.crt", result["ca"])
             atomic_write(self.settings.home / "device.crt", result["certificate"])
             write_frpc(self.settings, self.vault.read())
         secure_windows_directory(self.settings.home)
@@ -165,7 +175,8 @@ class Agent:
                 self.resource_tokens.clear()
                 self.synced_at = 0
                 self.published.clear()
-            await self.frp.stop()
+            if self.frp is not None:
+                await self.frp.stop()
             for actor in list(self.actors.values()):
                 await actor.close()
             self.actors.clear()
@@ -181,6 +192,8 @@ class Agent:
         await self.api("POST", "/api/devices/heartbeat")
         if self.role == "host":
             from cryptography import x509
+
+            from .frp import write_frpc
 
             details = await self.api("GET", "/api/devices/connection")
             if (
@@ -262,7 +275,8 @@ class Agent:
                 if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {401, 403}:
                     self.access_expires = 0
                     self.synced_at = 0
-                    await self.frp.stop()
+                    if self.frp is not None:
+                        await self.frp.stop()
                     for actor in list(self.actors.values()):
                         await actor.close()
                     self.actors.clear()
@@ -280,7 +294,8 @@ class Agent:
         if self.task:
             self.task.cancel()
             await asyncio.gather(self.task, return_exceptions=True)
-        await self.frp.stop()
+        if self.frp is not None:
+            await self.frp.stop()
         for actor in list(self.actors.values()):
             await actor.close()
 
@@ -410,7 +425,9 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             "device_id": agent.settings.data.get("device_id"),
             "cloud_url": agent.settings.data.get("cloud_url"),
             "allow_insecure_http": bool(agent.settings.data.get("allow_insecure_http")),
-            "frp_running": bool(agent.frp.process and agent.frp.process.returncode is None),
+            "frp_running": bool(
+                agent.frp is not None and agent.frp.process and agent.frp.process.returncode is None
+            ),
             "port": agent.port,
             "subscribe_all": bool(agent.settings.data.get("subscribe_all")),
             "adapter_processes": len(agent.actors),

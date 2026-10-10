@@ -136,6 +136,8 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
                     development=development,
                     allow_insecure_http=public_http,
                 )
+                assert agent.frp is None
+                assert not (client_settings.home / "bin").exists()
                 host.vault.update(
                     services={
                         "srv_demo": {

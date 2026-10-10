@@ -22,7 +22,6 @@ from .agent import Agent, HostAdapter, create_agent_app
 from .cloud import create_cloud, create_frp_plugin
 from .config import Settings, default_home, validate_cloud_url
 from .database import OAuthCode, User, WebSession, database
-from .frp import FrpProcess, download_frp, write_frps
 from .protocol import proxy_server
 from .security import new_id, passwords
 from .vault import Vault
@@ -38,6 +37,8 @@ def initialize_cloud(
     frp_port: int | None = None,
     migrate_origin=False,
 ):
+    from .frp import write_frps
+
     settings.home.mkdir(parents=True, exist_ok=True, mode=0o700)
     public_url = validate_cloud_url(public_url, development, allow_insecure_http)
     origin_changed = bool(settings.data.get("cloud_url") and settings.data["cloud_url"] != public_url)
@@ -72,6 +73,8 @@ def initialize_cloud(
 
 
 async def run_cloud(settings: Settings, no_frp=False):
+    from .frp import FrpProcess, write_frps
+
     if settings.data.get("role") != "cloud":
         raise ValueError("Run cloud-init before starting the cloud service")
     if settings.cloud_url != settings.data.get("cloud_url"):
@@ -263,6 +266,10 @@ def main():
             agent = Agent(settings, settings.data.get("role", "client"))
             print(agent.vault.read()["local_password"])
         elif args.command == "install-frp":
+            if settings.data.get("role") == "client":
+                raise ValueError("Client profiles do not support installing or running frp")
+            from .frp import download_frp
+
             print(asyncio.run(download_frp(settings.home, args.binary)))
         elif args.command == "doctor":
             print(
