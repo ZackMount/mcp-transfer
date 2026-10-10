@@ -1,3 +1,3 @@
 """MCP Transfer: cloud, host and client in one distributable package."""
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"

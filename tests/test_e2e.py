@@ -22,6 +22,7 @@ from mcp_transfer.cli import initialize_cloud
 from mcp_transfer.cloud import create_cloud, create_frp_plugin
 from mcp_transfer.config import Settings
 from mcp_transfer.frp import FrpProcess, download_frp, write_frps
+from mcp_transfer.protocol import mapped_client
 
 
 def available_port():
@@ -240,6 +241,19 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
                                 ).status_code == 200
                                 with pytest.raises((MCPError, httpx2.HTTPError)):
                                     await mcp.call_tool("add", {"a": 1, "b": 2})
+                                old_device = client_settings.data["device_id"]
+                                recovery_code = (await admin.post(
+                                    "/api/enrollment-codes", json={"role": "client", "owner": owner}
+                                )).json()["code"]
+                                recovered = await agent.reconnect_client(
+                                    public, recovery_code, "Recovered client", allow_insecure_http=public_http
+                                )
+                                assert recovered["synced"] is True
+                                assert client_settings.data["device_id"] != old_device
+                                local_token = agent.vault.read()["mappings"]["srv_demo"]["token"]
+                                async with mapped_client(client_port, "srv_demo", local_token) as fresh:
+                                    assert [tool.name for tool in (await fresh.list_tools()).tools] == ["add"]
+                                    assert "42" in (await fresh.call_tool("add", {"a": 20, "b": 22})).model_dump_json()
     finally:
         await host.close()
         await agent.close()

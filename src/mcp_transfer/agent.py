@@ -82,9 +82,10 @@ class Agent:
         return httpx.AsyncClient(**options)
 
     async def enroll(
-        self, cloud_url: str, code: str, name: str, development=False, allow_insecure_http=False
+        self, cloud_url: str, code: str, name: str, development=False, allow_insecure_http=False,
+        replace_client=False,
     ):
-        if self.settings.data.get("device_id"):
+        if self.settings.data.get("device_id") and not (replace_client and self.role == "client"):
             raise ValueError(
                 "Device already enrolled. Revoke it in the cloud and use a new profile to re-enroll."
             )
@@ -115,6 +116,37 @@ class Agent:
             atomic_write(self.settings.home / "device.crt", result["certificate"])
             write_frpc(self.settings, self.vault.read())
         secure_windows_directory(self.settings.home)
+
+    async def reconnect_client(self, cloud_url: str, code: str, name: str, allow_insecure_http=False):
+        if self.role != "client":
+            raise ValueError("Only client profiles support this recovery operation")
+        async with self.connection_lock:
+            if self.settings.data.get("device_id") and self.vault.read().get("refresh_token"):
+                try:
+                    await self.api("GET", "/api/catalog")
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code not in {401, 403}:
+                        raise
+                else:
+                    raise ValueError("现有设备登记仍然有效。若要更换登记，请先在云端撤销旧客户端。")
+            async with self.refresh_lock:
+                # A failed code exchange leaves the existing profile intact.
+                # No new credentials can race a background refresh during replacement.
+                await self.enroll(
+                    cloud_url, code, name, bool(self.settings.data.get("development")),
+                    allow_insecure_http, replace_client=True,
+                )
+                self.access = ""
+                self.access_expires = 0
+                self.resource_tokens.clear()
+                self.catalog = []
+                self.synced_at = 0
+            try:
+                await self._tick()
+            except Exception as error:
+                self.status = "连接失败：" + type(error).__name__
+                return {"ok": True, "synced": False, "message": "新登记已保存，但同步失败。请检查网络后点击立即同步。"}
+            return {"ok": True, "synced": True, "message": "已重新登记并同步，本机映射和导出设置已保留。"}
 
     async def cloud_access(self):
         async with self.refresh_lock:
@@ -428,6 +460,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             "status": agent.status,
             "device_id": agent.settings.data.get("device_id"),
             "cloud_url": agent.settings.data.get("cloud_url"),
+            "name": agent.settings.data.get("name", ""),
             "allow_insecure_http": bool(agent.settings.data.get("allow_insecure_http")),
             "frp_running": bool(
                 agent.frp is not None and agent.frp.process and agent.frp.process.returncode is None
@@ -473,6 +506,28 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
                 "Address saved, but connection failed. Check the cloud address and retry synchronization.",
             ) from error
         return {"ok": True}
+
+    @app.post("/api/reconnect")
+    async def reconnect(request: Request):
+        local_user(request)
+        if agent.role != "client":
+            raise HTTPException(403, "Client role required")
+        body = await request.json()
+        try:
+            return await agent.reconnect_client(
+                body.get("cloud_url", ""), body.get("code", ""), body.get("name", "Device"),
+                bool(body.get("allow_insecure_http", agent.settings.data.get("allow_insecure_http", False))),
+            )
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        except httpx.HTTPStatusError as error:
+            try:
+                detail = error.response.json().get("detail", "登记被云端拒绝，请检查接入码")
+            except ValueError:
+                detail = "登记被云端拒绝，请检查接入码"
+            raise HTTPException(400, str(detail)[:300]) from error
+        except httpx.HTTPError as error:
+            raise HTTPException(503, "无法连接云端。旧登记和本机映射已保留，请检查地址和网络。") from error
 
     @app.post("/api/network")
     async def network(request: Request):

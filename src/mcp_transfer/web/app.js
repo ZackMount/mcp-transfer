@@ -78,9 +78,16 @@ async function overview(main) {
     main.append(panel("连接边界", el("p", {}, "客户端通过配置的云端入口访问服务。frp 的业务映射端口只监听云服务器内部地址，原始 MCP 不直接暴露到公网。"), el("p", { class: "small" }, "云端是受信中转，会处理 MCP 调用内容。审计默认记录调用身份、服务、方法及状态，不保存工具参数或结果正文。")));
   } else {
     const status = await api("/api/status");
-    main.append(panel("云端连接状态", el("div", { class: "row spread" }, el("div", {}, badge(status.status, status.status === "已连接"), el("p", {}, status.cloud_url || "尚未连接云端"), el("code", {}, status.device_id || "待登记设备")), action("立即同步", async () => { await api("/api/sync", "POST", {}); await render(); }, "primary")), el("p", { class: "small muted" }, "此状态表示设备与云端同步成功。请在 MCP 服务页检测工具，确认服务可用。")));
+    main.append(panel("云端连接状态", el("div", { class: "row spread" }, el("div", {}, badge(status.status, status.status === "已连接"), el("p", {}, status.cloud_url || "尚未连接云端"), el("code", {}, status.device_id || "待登记设备")), action("立即同步", async () => { await api("/api/sync", "POST", {}); await render(); }, "primary")), el("p", { class: "small muted" }, "“已连接”表示设备与云端同步成功。请在 MCP 服务页检测工具，确认服务可用。")));
     if (!status.device_id) main.append(form("首次连接云端", [input("云端地址", "cloud_url", "url", "", "例如 https://mcp.example.com"), input("设备名称", "name", "text", state.role === "host" ? "我的 MCP 主机" : "我的工作电脑"), input("一次性接入码", "code", "password"), check("允许明文 HTTP（密码、Token 和调用内容没有传输加密）", "allow_insecure_http", status.allow_insecure_http)], "连接并登记", async data => { data.allow_insecure_http = data.allow_insecure_http === "on"; await api("/api/configure", "POST", data); toast("设备已登记"); await render(); }));
     else main.append(panel(state.role === "host" ? "发布你的 MCP 服务" : "把远程服务带到本机", el("p", {}, state.role === "host" ? "在 MCP 服务页添加 HTTP、stdio 或旧 SSE 服务。stdio 测试会启动配置的程序，导入的服务默认停用。" : "同步已授权目录后，可以一次订阅全部服务，生成应用配置。云端令牌由后台管理，不必填入 AI 应用。"), action(state.role === "host" ? "添加服务" : "查看可用服务", () => navigate("servers"), "primary")));
+    if (state.role === "client" && status.device_id) {
+      main.append(panel("重新接入云端", el("p", {}, "设备被撤销或凭证过期时，在云端生成新的客户端接入码，再在这里重新登记。保留本机映射和导出设置，访问权限会按新设备重新检查；指定给旧设备的授权需要在云端重新分配。"),
+        form("使用新的接入码", [input("云端地址", "cloud_url", "url", status.cloud_url || ""), input("设备名称", "name", "text", status.name || "我的工作电脑"), input("新的一次性接入码", "code", "password"), check("允许明文 HTTP", "allow_insecure_http", status.allow_insecure_http)], "重新登记并同步", async data => {
+          data.allow_insecure_http = data.allow_insecure_http === "on";
+          const result = await api("/api/reconnect", "POST", data); toast(result.message); await render();
+        })));
+    }
     if (state.role === "host") main.append(panel("运行信息", el("p", {}, `frp 进程：${status.frp_running ? "运行中" : "未运行"} · MCP 适配实例：${status.adapter_processes}`), el("p", { class: "small" }, "frp 进程运行不等于隧道一定可用，请结合云端状态和实际调用检查。需要桌面或浏览器的 MCP 应在当前用户会话中运行。")));
   }
   if (location.pathname === "/oauth/authorize" && state.role === "cloud") {
