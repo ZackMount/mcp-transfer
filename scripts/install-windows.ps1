@@ -58,9 +58,11 @@ $Principal = New-ScheduledTaskPrincipal -UserId $Identity -LogonType Interactive
 $TaskSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $TaskName -Action $TaskAction -Trigger $Trigger -Principal $Principal -Settings $TaskSettings -Force | Out-Null
 Start-ScheduledTask -TaskName $TaskName
+$ExpectedVersion = (& $RuntimePython -c 'from mcp_transfer import __version__; print(__version__)').Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Cannot read the installed application version.' }
 $Ready = $false
 for ($i = 0; $i -lt 45; $i++) {
-    try { $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 2; if ($Health.role -eq $Role) { $Ready = $true; break } } catch { }
+    try { $Health = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/healthz" -TimeoutSec 2; if ($Health.role -eq $Role -and $Health.version -eq $ExpectedVersion) { $Ready = $true; break } } catch { }
     Start-Sleep -Seconds 1
 }
 if (-not $Ready) { throw "The agent did not become ready. Inspect Scheduled Task $TaskName or run: $RuntimePython -m mcp_transfer --home `"$DataRoot`" $Role --port $Port" }

@@ -822,6 +822,7 @@ class HostAdapter:
         except HTTPException as error:
             await JSONResponse({"detail": error.detail}, status_code=error.status_code)(scope, receive, send)
         except Exception:
+            logging.exception("Host MCP adapter failed: server=%s", sid)
             await JSONResponse({"detail": "Host adapter failed; inspect MCP configuration"}, status_code=502)(
                 scope, receive, send
             )
