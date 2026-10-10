@@ -3,11 +3,15 @@ param(
     [int]$Port = 0,
     [switch]$AllowInsecureHttp,
     [switch]$PrepareOnly,
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$Uninstall,
+    [switch]$Purge
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($env:OS -ne 'Windows_NT') { throw 'This bootstrap requires Windows.' }
+if ($Clean -and $Uninstall) { throw 'Use -Clean to reinstall, or -Uninstall to uninstall; they cannot be combined.' }
+if ($Purge -and -not $Uninstall) { throw '-Purge requires -Uninstall. For a clean reinstall use -Clean.' }
 $Stage = Join-Path ([System.IO.Path]::GetTempPath()) ('mcp-transfer-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $Stage | Out-Null
 try {
@@ -25,6 +29,12 @@ try {
     }
     Write-Host "Source ready: $SourceRoot"
     if ($PrepareOnly) { return }
+    if ($Uninstall) {
+        $Cleanup = @{Role=$Role; Purge=$Purge}
+        if ($Purge -and $Role -eq 'client') { $Cleanup.RemoveExports = $true }
+        & (Join-Path $SourceRoot 'scripts\uninstall-windows.ps1') @Cleanup
+        return
+    }
     if ($Clean) {
         $Cleanup = @{Role=$Role; Purge=$true}
         if ($Role -eq 'client') { $Cleanup.RemoveExports = $true }

@@ -1,17 +1,22 @@
 #!/usr/bin/env bash
 # Public download bootstrap. No GitHub account or Git is needed for a new install.
 set -euo pipefail
-INSTALL_DIR=""; PREPARE_ONLY=0; INSTALL_ARGS=(); DOWNLOAD_PROXY=""; NATIVE=0; CLEAN=0
+INSTALL_DIR=""; PREPARE_ONLY=0; INSTALL_ARGS=(); DOWNLOAD_PROXY=""; NATIVE=0; CLEAN=0; UNINSTALL=0; PURGE=0; YES=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir) INSTALL_DIR="${2:?--install-dir needs a directory}"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
     --native) NATIVE=1; shift ;;
     --clean) CLEAN=1; shift ;;
+    --uninstall) UNINSTALL=1; shift ;;
+    --purge) PURGE=1; shift ;;
+    --yes) YES=1; shift ;;
     --download-proxy) DOWNLOAD_PROXY="${2:?--download-proxy needs a URL}"; INSTALL_ARGS+=("--download-proxy" "$DOWNLOAD_PROXY"); shift 2 ;;
     *) INSTALL_ARGS+=("$1"); shift ;;
   esac
 done
+if [[ "$CLEAN" == 1 && "$UNINSTALL" == 1 ]]; then printf 'Use --clean to reinstall or --uninstall to uninstall.\n' >&2; exit 2; fi
+if [[ "$PURGE" == 1 && "$UNINSTALL" != 1 ]]; then printf '--purge requires --uninstall; use --clean for a clean reinstall.\n' >&2; exit 2; fi
 if [[ -n "$DOWNLOAD_PROXY" && ! "$DOWNLOAD_PROXY" =~ ^https?://[^[:space:]]+$ ]]; then
   printf 'Download proxy must be an HTTP(S) URL without whitespace.\n' >&2; exit 2
 fi
@@ -50,7 +55,7 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/mcp-transfer}"
 if [[ -d "$INSTALL_DIR" && -n "$(ls -A "$INSTALL_DIR")" && ! -f "$INSTALL_DIR/src/mcp_transfer/__init__.py" ]]; then
   printf 'Selected directory is nonempty and is not an MCP Transfer source directory. Refusing to overwrite it.\n' >&2; exit 1
 fi
-if [[ "$CLEAN" != 1 ]] && command -v docker >/dev/null && docker volume inspect mcp-transfer_postgres_data >/dev/null 2>&1; then
+if [[ "$CLEAN" != 1 && "$UNINSTALL" != 1 ]] && command -v docker >/dev/null && docker volume inspect mcp-transfer_postgres_data >/dev/null 2>&1; then
   if [[ ! -f "$INSTALL_DIR/data/cloud/settings.json" || ! -f "$INSTALL_DIR/data/cloud/pki/ca.key" || ! -f "$INSTALL_DIR/data/cloud/signing.key" ]]; then
     printf 'An existing database volume was found, but the selected directory lacks its identity keys. Specify --install-dir with the original deployment directory.\n' >&2; exit 1
   fi
@@ -88,6 +93,13 @@ else
 fi
 printf 'Source ready: %s\n' "$INSTALL_DIR"
 if [[ "$PREPARE_ONLY" == 1 ]]; then exit 0; fi
+if [[ "$UNINSTALL" == 1 ]]; then
+  CLEANUP_ARGS=(--install-dir "$INSTALL_DIR")
+  if [[ "$PURGE" == 1 ]]; then CLEANUP_ARGS+=(--purge); fi
+  if [[ "$YES" == 1 ]]; then CLEANUP_ARGS+=(--yes); fi
+  bash "$INSTALL_DIR/scripts/uninstall-cloud.sh" "${CLEANUP_ARGS[@]}"
+  exit 0
+fi
 if [[ "$CLEAN" == 1 ]]; then
   # Retain the freshly downloaded source while deleting only deployment data.
   bash "$INSTALL_DIR/scripts/uninstall-cloud.sh" --install-dir "$INSTALL_DIR" --purge --keep-source --yes

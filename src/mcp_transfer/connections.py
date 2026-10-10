@@ -74,6 +74,8 @@ class Connections:
 
         url, code, name, allow_http = validate_enrollment(body, self.primary.settings)
         url = validate_cloud_url(url, bool(self.primary.settings.data.get("development")), allow_http)
+        if not isinstance(body.get("label", ""), str):
+            raise ValueError("连接名称必须是文本")
         label = body.get("label", "").strip() or url
         if len(label) > 128:
             raise ValueError("连接名称最多 128 个字符")
@@ -119,8 +121,8 @@ class Connections:
             except Exception as error:
                 from httpx import HTTPStatusError
 
-                if not isinstance(error, HTTPStatusError) or error.response.status_code not in {401, 403, 404}:
-                    raise ValueError("云端撤销失败，连接已保留。请检查网络，或先在云端删除此设备。") from error
+                if not isinstance(error, HTTPStatusError) or error.response.status_code not in {401, 403}:
+                    raise ValueError("云端撤销失败，连接已保留。请升级云端至 v0.2.0 并检查网络，或先在云端删除此设备。") from error
             await agent.close()
             self.agents.pop(cid)
             self.primary.settings.data["connections"] = [key for key in self.agents if key != "primary"]
@@ -130,7 +132,22 @@ class Connections:
             archive = self.primary.settings.home / "removed-connections"
             archive.mkdir(mode=0o700, exist_ok=True)
             agent.settings.home.rename(archive / cid)
-            return {"ok": True, "message": "云端设备已撤销，连接已移除。本机配置保留在 removed-connections。"}
+            warnings = []
+            if agent.role == "client":
+                from .exporters import TARGETS, export_preview, write_export
+
+                targets = set(self.primary.settings.data.get("export_targets", [])) | set(agent.settings.data.get("export_targets", []))
+                for target in targets & TARGETS:
+                    try:
+                        preview = export_preview(target, [], agent.settings.home, {}, agent.port, "stdio", route_prefix=agent.route_prefix)
+                        if preview["diff"]:
+                            write_export(preview)
+                    except (ValueError, OSError):
+                        warnings.append(target)
+            message = "云端设备已撤销，连接已移除，已写入的应用配置已清理。本机配置保留在 removed-connections。"
+            if warnings:
+                message += " 以下配置无法安全合并，请手工清理：" + "、".join(warnings)
+            return {"ok": True, "message": message, "configuration_warnings": warnings}
 
     async def start(self):
         self.running = True
@@ -148,6 +165,13 @@ class Connections:
                 target, agent.active_mapping_ids(), agent.settings.home,
                 agent.vault.read().get("mappings", {}), agent.port, mode, content,
                 {item["id"]: item["name"] for item in agent.catalog}, agent.route_prefix,
+            )
+        for profile in (self.primary.settings.home / "removed-connections").glob("conn_*/settings.json"):
+            settings = Settings(profile.parent)
+            content = generate(
+                target, [], self.primary.settings.home / "connections" / profile.parent.name,
+                {}, int(settings.data.get("ui_port", self.primary.port)), mode, content,
+                route_prefix=settings.data.get("route_prefix", ""),
             )
         diff = "".join(difflib.unified_diff(existing.splitlines(True), content.splitlines(True), fromfile=str(path), tofile=str(path)))
         return {"path": str(path), "before": existing, "content": content, "diff": diff}

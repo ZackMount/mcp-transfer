@@ -77,6 +77,11 @@ Write-Host 'Local access password (save securely):'
 if ($LASTEXITCODE -ne 0) { throw 'The service is running, but local password retrieval failed. Inspect data\agent.log.' }
 $PasswordCmd = "@echo off`r`n`"%LOCALAPPDATA%\MCPTransfer\$Role\runtime\Scripts\python.exe`" -m mcp_transfer --home `"%LOCALAPPDATA%\MCPTransfer\$Role\data`" local-password`r`npause`r`n"
 Set-Content -Path (Join-Path $InstallRoot 'show-access-password.cmd') -Value $PasswordCmd -Encoding ASCII
+$Helpers = Join-Path $InstallRoot 'scripts'
+New-Item -ItemType Directory -Force -Path $Helpers | Out-Null
+foreach ($Helper in @('windows-runtime.ps1','manage-windows.ps1','uninstall-windows.ps1')) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $Helper) -Destination (Join-Path $Helpers $Helper) -Force
+}
 Start-Process "http://127.0.0.1:$Port"
 Write-Host 'In the WebUI, enter the cloud URL and the one-time enrollment code for this role.'
 } finally {

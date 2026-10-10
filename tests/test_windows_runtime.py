@@ -43,3 +43,56 @@ def test_background_pythonw_serves_authenticated_webui(tmp_path):
     finally:
         process.terminate()
         process.wait(timeout=10)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Actual Windows console attachment test")
+async def test_frpc_started_from_pythonw_has_no_console_and_dies_with_parent(tmp_path):
+    import asyncio
+    import json
+
+    from mcp_transfer.frp import download_frp
+
+    await download_frp(tmp_path, "frpc")
+    (tmp_path / "frpc.toml").write_text('serverAddr = "127.0.0.1"\nserverPort = 1\nloginFailExit = false\n', encoding="utf-8")
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "import asyncio, sys\nfrom pathlib import Path\nfrom mcp_transfer.config import Settings\nfrom mcp_transfer.frp import FrpProcess\n"
+        "async def run():\n    home=Path(sys.argv[1])\n    frp=FrpProcess(Settings(home),'frpc')\n"
+        "    await frp.start()\n    (home/'pid.txt').write_text(str(frp.process.pid))\n    await asyncio.sleep(60)\n"
+        "asyncio.run(run())\n", encoding="utf-8",
+    )
+    pythonw = Path(sys.executable).with_name("pythonw.exe")
+    process = subprocess.Popen([str(pythonw), str(worker), str(tmp_path)])
+    try:
+        for _ in range(100):
+            if (tmp_path / "pid.txt").exists():
+                break
+            assert process.poll() is None
+            await asyncio.sleep(0.1)
+        pid = int((tmp_path / "pid.txt").read_text())
+        probe = tmp_path / "console.json"
+        program = "import ctypes,json,sys; from pathlib import Path; k=ctypes.WinDLL('kernel32',use_last_error=True); result=bool(k.AttachConsole(int(sys.argv[1]))); Path(sys.argv[2]).write_text(json.dumps({'attached':result,'error':ctypes.get_last_error()}))"
+        checked = subprocess.Popen([str(pythonw), "-c", program, str(pid), str(probe)])
+        checked.wait(timeout=10)
+        result = json.loads(probe.read_text())
+        assert result == {"attached": False, "error": 6}, result
+        process.terminate()
+        process.wait(timeout=10)
+        import win32api
+        import win32con
+        import win32event
+
+        # Job Object parent exit must stop this frpc rather than leave an orphan.
+        try:
+            handle = win32api.OpenProcess(win32con.SYNCHRONIZE, False, pid)
+        except Exception:
+            handle = None
+        if handle:
+            try:
+                assert win32event.WaitForSingleObject(handle, 10000) == win32event.WAIT_OBJECT_0
+            finally:
+                handle.Close()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)

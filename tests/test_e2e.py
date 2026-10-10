@@ -5,7 +5,7 @@ import os
 import socket
 import ssl
 import sys
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -23,6 +23,131 @@ from mcp_transfer.cloud import create_cloud, create_frp_plugin
 from mcp_transfer.config import Settings
 from mcp_transfer.frp import FrpProcess, download_frp, write_frps
 from mcp_transfer.protocol import mapped_client
+
+
+@pytest.mark.skipif(os.environ.get("MCPT_E2E") != "1", reason="Real multi-cloud CLI + frp integration")
+async def test_real_two_clouds_share_one_host_and_client_ui_without_overwriting_connections(tmp_path, monkeypatch):
+    import subprocess
+
+    from mcp_transfer.database import Device
+    from mcp_transfer.security import digest
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+
+    workers = []
+    frps = []
+    logs = []
+    try:
+        async with AsyncExitStack() as stack:
+            admins = []
+            for index in range(2):
+                settings = Settings(tmp_path / f"cloud-{index}")
+                settings.data.update(frp_port=available_port(), plugin_port=available_port())
+                settings.save()
+                port = available_port()
+                origin = f"http://127.0.0.1:{port}"
+                initialize_cloud(settings, origin, password="multi-cloud-password-123", development=True)
+                app = create_cloud(settings)
+                await stack.enter_async_context(serve(app, port))
+                await stack.enter_async_context(serve(create_frp_plugin(settings), settings.data["plugin_port"]))
+                admin = await stack.enter_async_context(httpx.AsyncClient(base_url=origin, trust_env=False, timeout=30))
+                login = await admin.post("/api/auth/login", json={"username": "admin", "password": "multi-cloud-password-123"})
+                admin.headers["x-csrf-token"] = login.json()["csrf"]
+                if index:
+                    owner = (await admin.get("/api/me")).json()["id"]
+                    with app.state.db.begin() as session:
+                        session.add(Device(id="d_reserved", owner=owner, name="Reserve local test port", role="host", active=False, refresh_hash=digest("reserved"), refresh_expires=0, port=21000))
+                await download_frp(settings.home, "frps")
+                process = FrpProcess(settings, "frps")
+                await process.start()
+                frps.append(process)
+                admins.append((admin, origin))
+            host_home = tmp_path / "host"
+            host_settings = Settings(host_home)
+            host_settings.data.update(role="host", adapter_port=available_port())
+            host_settings.save()
+            await download_frp(host_home, "frpc")
+            client_home = tmp_path / "client"
+            frontends = {}
+            for role, home in [("host", host_home), ("client", client_home)]:
+                port = available_port()
+                log = open(tmp_path / (role + "-cli.log"), "wb")
+                logs.append(log)
+                worker = subprocess.Popen([sys.executable, "-m", "mcp_transfer", "--home", str(home), role, "--port", str(port), "--development"], stdout=log, stderr=log)
+                workers.append(worker)
+                ui = await stack.enter_async_context(httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}", trust_env=False, timeout=45))
+                for _ in range(200):
+                    try:
+                        response = await ui.get("/healthz")
+                        if response.status_code == 200:
+                            break
+                    except httpx.HTTPError:
+                        pass
+                    assert worker.poll() is None
+                    await asyncio.sleep(0.05)
+                else:
+                    raise RuntimeError("CLI WebUI did not start")
+                from mcp_transfer.vault import Vault
+
+                password = Vault(home).read()["local_password"]
+                login = await ui.post("/api/auth/login", json={"password": password})
+                ui.headers["x-csrf-token"] = login.json()["csrf"]
+                prefixes = []
+                for index, (admin, origin) in enumerate(admins):
+                    code = (await admin.post("/api/enrollment-codes", json={"role": role})).json()["code"]
+                    route = "/api/configure" if not index else "/api/connections"
+                    registered = await ui.post(route, json={"cloud_url": origin, "name": role + str(index), "code": code})
+                    assert registered.status_code == 200, registered.text
+                    prefix = "" if not index else "/connections/" + registered.json()["id"]
+                    prefixes.append(prefix)
+                    if role == "host":
+                        added = await ui.post(prefix + "/api/servers", json={"name": f"Cloud {index} demo", "transport": "stdio", "command": sys.executable, "args": ["-m", "mcp_transfer", "demo-server"]})
+                        assert added.status_code == 200
+                        assert (await ui.post(prefix + "/api/sync", json={})).status_code == 200
+                frontends[role] = (ui, prefixes)
+            client_ui, prefixes = frontends["client"]
+            for index, prefix in enumerate(prefixes):
+                for _ in range(50):
+                    await client_ui.post(prefix + "/api/sync", json={})
+                    catalog = (await client_ui.get(prefix + "/api/servers")).json()
+                    if catalog:
+                        break
+                    await asyncio.sleep(0.1)
+                assert len(catalog) == 1
+                assert catalog[0]["name"] == f"Cloud {index} demo"
+                await client_ui.post(prefix + "/api/subscribe", json={"all": True})
+                home = client_home if not prefix else client_home / "connections" / prefix.rsplit("/", 1)[-1]
+                parameters = StdioServerParameters(command=sys.executable, args=["-m", "mcp_transfer", "--home", str(home), "connect", "--server", catalog[0]["id"]])
+                # Retry only read-only discovery while the new TLS adapter starts.
+                for attempt in range(12):
+                    try:
+                        async with Client(parameters, mode="legacy", cache=None) as mcp:
+                            listed = await mcp.list_tools()
+                            assert "add" in {tool.name for tool in listed.tools}
+                            assert mcp.server_info.name == f"Cloud {index} demo"
+                            result = await mcp.call_tool("add", {"a": 20, "b": 22})
+                            assert result.content[0].text == "42"
+                        break
+                    except Exception:
+                        if attempt == 11:
+                            raise
+                        await asyncio.sleep(0.5)
+            assert len((await frontends["host"][0].get("/api/connections")).json()) == 2
+            assert len((await client_ui.get("/api/connections")).json()) == 2
+            assert not list(client_home.rglob("frpc*"))
+    finally:
+        for worker in reversed(workers):
+            if worker.poll() is None:
+                worker.terminate()
+                try:
+                    await asyncio.to_thread(worker.wait, timeout=15)
+                except subprocess.TimeoutExpired:
+                    worker.kill()
+                    await asyncio.to_thread(worker.wait)
+        for process in reversed(frps):
+            await process.stop()
+        for log in logs:
+            log.close()
 
 
 def available_port():

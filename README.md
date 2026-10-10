@@ -188,7 +188,7 @@ docker compose restart cloud
 
 客户端可分别同步和订阅，然后在「配置导出」选择「所有云端连接」合并生成 Cursor／其他应用配置。同名服务以及不同云端相同的服务 ID 会生成不同条目；导出当前连接也不会删除其他连接的条目。多个客户端安装不要同时自动写同一应用文件。
 
-额外连接可以直接移除，先撤销该云端设备再归档本机配置到 `data/removed-connections`；网络失败会保留连接供重试。默认连接为兼容已有导出路径而保留，可用下面的替换操作重新登记。
+额外连接可以直接移除，先撤销该云端设备，备份并清理它已写入的应用配置，再归档本机配置到 `data/removed-connections`；网络失败会保留连接供重试。默认连接为兼容已有导出路径而保留，可用下面的替换操作重新登记。
 
 ### 并发限制
 
@@ -284,7 +284,17 @@ sudo bash /opt/mcp-transfer/scripts/uninstall-cloud.sh --purge --yes
 & .\scripts\uninstall-windows.ps1 -Role host -Purge
 ```
 
-清理脚本校验安装目录及资源归属，不删除其他系统服务、Docker Engine、系统 Python 或全局代理设置。
+无需找到源码目录的一行完全卸载入口：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash -s -- --uninstall --purge --yes
+```
+
+```powershell
+Set-Location $env:TEMP; $p=Join-Path $env:TEMP 'mcp-transfer-bootstrap.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-windows.ps1' -ErrorAction Stop -OutFile $p; & $p -Role client -Uninstall -Purge
+```
+
+去掉清理参数 `--purge --yes`／`-Purge` 会停止并卸载后台任务、保留数据；角色改为 host 管理主机端。清理脚本校验安装目录及资源归属，不删除其他系统服务、Docker Engine、系统 Python 或全局代理设置。
 
 ## 更新、日志与卸载
 
@@ -301,6 +311,8 @@ sudo tail -n 100 data/cloud/frps.log
 Windows 更新：重新运行对应角色的公开下载命令；保留数据、配置和 DPAPI 凭证。下载源码缓存在 `%LOCALAPPDATA%\MCPTransfer-source`，与运行数据分开。宿主重启需重新登录用户，后台任务才会启动。
 
 ```powershell
+# 已安装设备：启动、停止、重启或查看状态（将 client 改为 host 管理主机）
+& "$env:LOCALAPPDATA\MCPTransfer\client\scripts\manage-windows.ps1" -Role client -Action restart
 Get-ScheduledTask -TaskName 'MCPTransfer-*'
 & .\scripts\uninstall-windows.ps1 -Role client
 ```

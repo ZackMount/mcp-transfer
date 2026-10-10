@@ -50,6 +50,10 @@ async def test_two_clouds_share_ui_but_isolate_credentials_catalog_and_routes(cl
             prefix = "/connections/" + cid
             assert (await ui.post(prefix + "/api/sync", json={})).status_code == 200
             assert primary.vault.read()["refresh_token"] == old_secret
+            wrong_origin = await ui.put("/api/connection", json={"cloud_url": "https://secondserver"})
+            assert wrong_origin.status_code == 400
+            assert primary.settings.data["cloud_url"] == "https://testserver"
+            assert primary.vault.read()["refresh_token"] == old_secret
             assert child.frp is None and not (child.settings.home / "bin").exists()
             assert not {"frp_port", "frp_server", "remote_port"} & child.settings.data.keys()
             assert (await ui.get("/api/servers")).json()[0]["name"] == "First tool"
@@ -63,6 +67,7 @@ async def test_two_clouds_share_ui_but_isolate_credentials_catalog_and_routes(cl
             preview = (await ui.post("/api/exports/preview", json={"target": "cursor", "scope": "all"})).json()
             group = json.loads(preview["content"])["mcpServers"]
             assert len(group) == 2
+            assert (await ui.post("/api/exports/apply", json={"preview_id": preview["preview_id"]})).status_code == 200
             assert {tuple(entry["args"][-2:]) for entry in group.values()} == {("--server", "srv_shared")}
             restored = Connections(Agent(Settings(primary.settings.home), "client"))
             assert set(restored.agents) == {"primary", cid}
@@ -70,6 +75,8 @@ async def test_two_clouds_share_ui_but_isolate_credentials_catalog_and_routes(cl
             deleted = await ui.delete("/api/connections/" + cid)
             assert deleted.status_code == 200, deleted.text
             assert (await ui.get(prefix + "/api/status")).status_code == 404
+            remaining_config = json.loads((tmp_path / "cursor.json").read_text())["mcpServers"]
+            assert len(remaining_config) == 1
             assert (await ui.get("/api/status")).json()["device_id"] == primary.settings.data["device_id"]
             devices = second_admin.get("/api/devices").json()
             assert next(item for item in devices if item["id"] == child.settings.data["device_id"])["active"] is False

@@ -42,6 +42,7 @@ function action(text, fn, style = "") {
 }
 function input(label, name, type = "text", value = "", hint = "") {
   const control = type === "textarea" ? el("textarea", { name }, value) : el("input", { name, type, value, autocomplete: name === "code" || name === "otp" ? "one-time-code" : name === "current_password" ? "current-password" : type === "password" ? "new-password" : "off", required: ["username", "password", "current_password", "name", "cloud_url", "code"].includes(name) });
+  if (type === "number") { control.required = true; control.min = "0"; control.max = "4096"; control.step = "1"; }
   return el("label", {}, label, control, hint ? el("span", { class: "small" }, hint) : null);
 }
 function selectField(label, name, choices) {
@@ -263,7 +264,7 @@ async function connectionsPage(main) {
   const rows = await api("/api/connections", "GET", undefined, true);
   main.append(panel("同时连接多台云服务器", el("p", {}, "每个连接独立登记、保存凭证、同步和发布服务。切换页面仅改变正在查看的连接，其他连接持续运行。")));
   main.append(table(["连接", "地址", "状态", "操作"], rows.map(item => [item.name, item.cloud_url || "待接入", badge(item.status, item.status === "已连接"), el("div", { class: "row" }, action("管理", async () => { state.connection = item.id; await navigate("overview"); }), ...(item.id !== "primary" ? [action("移除此连接", async () => {
-    if (!confirm(`移除“${item.name}”？将撤销其云端设备。其他连接继续运行，本机配置保留在归档目录。`)) return;
+    if (!confirm(`移除“${item.name}”？将撤销其云端设备并清理此连接写入的应用配置（原文件备份）。其他连接继续运行，本机配置保留在归档目录。`)) return;
     const result = await api(`/api/connections/${item.id}`, "DELETE", undefined, true); if (state.connection === item.id) state.connection = "primary"; toast(result.message); await render();
   }, "danger")] : []))])));
   main.append(form("添加云端连接", [input("连接名称", "label", "text", "", "例如个人云、测试云"), input("云端地址", "cloud_url", "url"), input("设备名称", "name", "text", state.role === "host" ? "我的 MCP 主机" : "我的工作电脑"), input("新云端的一次性接入码", "code", "password"), check("允许此连接使用明文 HTTP", "allow_insecure_http"), ...(state.role === "host" ? [check("复制默认连接的服务定义（保持停用，检查后启用）", "copy_services")] : [])], "添加并保留现有连接", async data => {

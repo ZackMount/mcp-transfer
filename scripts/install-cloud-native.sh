@@ -5,6 +5,7 @@ ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "$ROOT_DIR"
 if [[ "$(uname -s)" != Linux || $EUID -ne 0 ]]; then printf 'Run this installer as root on Linux.\n' >&2; exit 1; fi
 if [[ "$ROOT_DIR" =~ [[:space:]\"\%] ]]; then printf 'Use an installation path without spaces, quotes or percent signs.\n' >&2; exit 2; fi
+case "$ROOT_DIR" in /home/*|/root/*|/run/user/*) printf 'The isolated service cannot read home directories. Install under /opt or /srv.\n' >&2; exit 2 ;; esac
 if ! command -v systemctl >/dev/null; then printf 'Native deployment requires systemd.\n' >&2; exit 1; fi
 if [[ -f .deployment-mode && "$(cat .deployment-mode)" != native ]] || [[ -f .env && ! -f .native.env ]]; then
   printf 'Existing Docker deployment detected. Use --clean --native for a full reset, or retain Docker. No data was changed.\n' >&2; exit 2
@@ -34,7 +35,7 @@ if [[ "$PUBLIC_URL" != http://* ]]; then
 fi
 PORT="${PUBLIC_URL##*:}"
 if [[ ! "$PORT" =~ ^[0-9]+$ ]]; then PORT=80; fi
-if (( PORT < 1024 )); then printf 'Native HTTP uses an unprivileged account. Choose a public port from 1024 to 65535.\n' >&2; exit 2; fi
+if (( PORT < 1024 || FRP_PORT < 1024 )); then printf 'Native services use an unprivileged account. Choose public and frp ports from 1024 to 65535.\n' >&2; exit 2; fi
 if ! command -v curl >/dev/null || ! command -v tar >/dev/null || ! command -v openssl >/dev/null; then
   printf 'curl, tar and openssl are required. Install them using your system package manager.\n' >&2; exit 1
 fi

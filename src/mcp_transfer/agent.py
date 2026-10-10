@@ -171,8 +171,7 @@ class Agent:
                     self.vault.update(mappings={})
                     self.settings.data["subscribe_all"] = True
                     self.settings.save()
-                for actor in list(self.actors.values()):
-                    await actor.close()
+                await asyncio.gather(*(actor.close() for actor in list(self.actors.values())))
                 self.actors.clear()
                 self.access = ""
                 self.access_expires = 0
@@ -256,6 +255,26 @@ class Agent:
             cloud_url, self.settings.data.get("development", False), allow_insecure_http
         )
         async with self.connection_lock:
+            # This operation changes the address of the SAME cloud identity.
+            # Adding another server uses an independent enrollment instead.
+            from cryptography.hazmat.primitives import serialization
+            from jwt.algorithms import RSAAlgorithm
+
+            known_key = serialization.load_pem_public_key(self.settings.data["signing_public_key"].encode())
+            async with self.cloud_http() as client:
+                response = await client.get(cloud_url + "/oauth/jwks", timeout=20)
+                response.raise_for_status()
+                keys = response.json().get("keys", [])
+            matched = False
+            for key in keys:
+                try:
+                    matched = RSAAlgorithm.from_jwk(key).public_numbers() == known_key.public_numbers()
+                except (ValueError, TypeError, AttributeError):
+                    continue
+                if matched:
+                    break
+            if not matched:
+                raise ValueError("新地址属于另一台云服务器，原连接已保留。请使用“添加云端连接”登记新服务器。")
             async with self.refresh_lock:
                 self.settings.data.update(cloud_url=cloud_url, allow_insecure_http=allow_insecure_http)
                 self.settings.save()
@@ -266,8 +285,7 @@ class Agent:
                 self.published.clear()
             if self.frp is not None:
                 await self.frp.stop()
-            for actor in list(self.actors.values()):
-                await actor.close()
+            await asyncio.gather(*(actor.close() for actor in list(self.actors.values())))
             self.actors.clear()
             await self._tick()
 
@@ -384,8 +402,7 @@ class Agent:
                     self.synced_at = 0
                     if self.frp is not None:
                         await self.frp.stop()
-                    for actor in list(self.actors.values()):
-                        await actor.close()
+                    await asyncio.gather(*(actor.close() for actor in list(self.actors.values())))
                     self.actors.clear()
             for key, actor in list(self.actors.items()):
                 if actor.active == 0 and actor.last_used < time.monotonic() - 300:
@@ -403,8 +420,7 @@ class Agent:
             await asyncio.gather(self.task, return_exceptions=True)
         if self.frp is not None:
             await self.frp.stop()
-        for actor in list(self.actors.values()):
-            await actor.close()
+        await asyncio.gather(*(actor.close() for actor in list(self.actors.values())))
 
 
 def validate_enrollment(body: dict, settings: Settings):
@@ -414,7 +430,19 @@ def validate_enrollment(body: dict, settings: Settings):
     url, code, name = url.strip(), code.strip(), name.strip()
     if not name or len(name) > 128 or not code or len(code) > 512:
         raise ValueError("请填写设备名称和一次性接入码；设备名称最多 128 个字符")
+    if "allow_insecure_http" in body and type(body["allow_insecure_http"]) is not bool:
+        raise ValueError("HTTP 选项必须是布尔值")
     return url, code, name, bool(body.get("allow_insecure_http", settings.data.get("allow_insecure_http", False)))
+
+
+def cloud_error_message(error: httpx.HTTPStatusError):
+    try:
+        detail = error.response.json().get("detail")
+        if isinstance(detail, str):
+            return detail[:300]
+    except (ValueError, AttributeError):
+        pass
+    return f"云端拒绝请求（HTTP {error.response.status_code}），请检查地址、代理及接入码"
 
 
 def validate_service(body: dict) -> dict:
@@ -422,6 +450,8 @@ def validate_service(body: dict) -> dict:
     name = str(body.get("name", "")).strip()
     if transport not in {"http", "stdio", "sse"} or not name or len(name) > 128:
         raise ValueError("Name and a supported transport are required")
+    if "enabled" in body and type(body["enabled"]) is not bool:
+        raise ValueError("Enabled must be a boolean")
     result = {
         "name": name,
         "description": str(body.get("description", ""))[:1000],
@@ -440,12 +470,19 @@ def validate_service(body: dict) -> dict:
             raise ValueError("Provide an executable and a JSON string array of arguments")
         env = body.get("env", {})
         if not isinstance(env, dict) or any(
-            not isinstance(k, str) or not isinstance(v, str) for k, v in env.items()
+            not isinstance(k, str) or not isinstance(v, str) or not k or "=" in k or "\0" in k + v for k, v in env.items()
         ):
             raise ValueError("Environment must be a string-to-string object")
+        cwd = body.get("cwd")
+        if cwd is not None and (not isinstance(cwd, str) or "\0" in cwd):
+            raise ValueError("Working directory must be a path string")
         result.update(command=command, args=args, env=env, cwd=body.get("cwd") or None)
     else:
+        if not isinstance(body.get("url", ""), str):
+            raise ValueError("Upstream URL must be text")
         url = urlsplit(body.get("url", ""))
+        if url.port is not None and not 1 <= url.port <= 65535:
+            raise ValueError("Upstream port must be between 1 and 65535")
         if (
             url.scheme not in {"http", "https"}
             or url.hostname not in {"127.0.0.1", "::1", "localhost"}
@@ -516,7 +553,7 @@ def create_agent_app(agent: Agent, background=True, session_store=None, connecti
             except ValueError as error:
                 raise HTTPException(400, str(error)) from error
             except httpx.HTTPStatusError as error:
-                raise HTTPException(400, "云端拒绝登记，请检查接入码是否有效及角色是否匹配") from error
+                raise HTTPException(400, cloud_error_message(error)) from error
             except httpx.HTTPError as error:
                 raise HTTPException(503, "无法连接新云端，原有连接已保留") from error
 
@@ -606,7 +643,7 @@ def create_agent_app(agent: Agent, background=True, session_store=None, connecti
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
         except httpx.HTTPStatusError as error:
-            raise HTTPException(400, "登记被云端拒绝，请检查接入码和设备角色") from error
+            raise HTTPException(400, cloud_error_message(error)) from error
         except httpx.HTTPError as error:
             raise HTTPException(503, "无法连接云端，登记尚未完成，请检查地址和网络") from error
         try:
@@ -891,6 +928,10 @@ def create_agent_app(agent: Agent, background=True, session_store=None, connecti
             result = write_export(preview)
         except (ValueError, OSError) as error:
             raise HTTPException(409, str(error)) from error
+        targets_written = agent.settings.data.setdefault("export_targets", [])
+        if preview["target"] not in targets_written:
+            targets_written.append(preview["target"])
+        agent.settings.save()
         if body.get("auto_sync"):
             targets = agent.settings.data.setdefault("auto_exports", {})
             targets[preview["target"]] = preview["mode"]
@@ -914,7 +955,12 @@ def create_agent_app(agent: Agent, background=True, session_store=None, connecti
         body = await limited_body(request)
         token = agent.resource_tokens.get(sid)
         if not token or token[1] < time.time() + 15:
-            result = await agent.api("POST", "/api/access-token", json={"server_id": sid})
+            try:
+                result = await agent.api("POST", "/api/access-token", json={"server_id": sid})
+            except httpx.HTTPStatusError as error:
+                raise HTTPException(error.response.status_code, "云端授权失效或服务不可用，请同步目录并检查设备登记") from error
+            except httpx.HTTPError as error:
+                raise HTTPException(503, "无法连接云端，请检查网络；调用未被自动重放") from error
             token = (result["access_token"], time.time() + result["expires_in"])
             agent.resource_tokens[sid] = token
         headers = {k: v for k, v in request.headers.items() if k.lower() in REQUEST_HEADERS}

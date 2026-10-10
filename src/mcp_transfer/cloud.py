@@ -1000,23 +1000,28 @@ def create_cloud(settings: Settings) -> FastAPI:
             raise HTTPException(
                 503, "Host tunnel is unavailable; no tool call was automatically replayed"
             ) from None
-        upstream_session = response.headers.get("mcp-session-id")
-        if upstream_session and message.get("method") == "initialize":
-            key = (sid, upstream_session)
-            previous = sessions.get(key)
-            if previous and previous[:2] != binding:
-                await response.aclose()
-                await cleanup()
-                raise HTTPException(502, "Upstream reused a session across identities")
-            sessions[key] = (*binding, time.time() + 3600)
-        if request.method == "DELETE" and session_id:
-            sessions.pop((sid, session_id), None)
-        if len(sessions) > 10000:
-            for key, value in list(sessions.items()):
-                if value[2] < time.time():
-                    sessions.pop(key, None)
-        log(device.owner, message.get("method", request.method), sid, str(response.status_code))
-        return await relay_response(response, cleanup, alive, message, policy)
+        try:
+            upstream_session = response.headers.get("mcp-session-id")
+            if upstream_session and message.get("method") == "initialize":
+                key = (sid, upstream_session)
+                previous = sessions.get(key)
+                if previous and previous[:2] != binding:
+                    await response.aclose()
+                    await cleanup()
+                    raise HTTPException(502, "Upstream reused a session across identities")
+                sessions[key] = (*binding, time.time() + 3600)
+            if request.method == "DELETE" and session_id:
+                sessions.pop((sid, session_id), None)
+            if len(sessions) > 10000:
+                for key, value in list(sessions.items()):
+                    if value[2] < time.time():
+                        sessions.pop(key, None)
+            log(device.owner, message.get("method", request.method), sid, str(response.status_code))
+            return await relay_response(response, cleanup, alive, message, policy)
+        except BaseException:
+            await response.aclose()
+            await cleanup()
+            raise
 
     return app
 
