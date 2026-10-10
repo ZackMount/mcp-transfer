@@ -60,8 +60,8 @@ async def serve(application, port, **kwargs):
     os.environ.get("MCPT_E2E") != "1",
     reason="Set MCPT_E2E=1 to download pinned frp and run real TLS integration",
 )
-@pytest.mark.parametrize("mode", ["auto", "legacy"])
-async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize("mode,public_http", [("auto", False), ("legacy", False), ("auto", True)])
+async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mode, public_http):
     cloud_port, adapter_port, client_port = available_port(), available_port(), available_port()
     cloud_settings = Settings(tmp_path / "cloud")
     cloud_settings.data["frp_port"] = available_port()
@@ -69,9 +69,16 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
     cloud_settings.save()
     # Go uses the macOS system trust store instead of SSL_CERT_FILE. Keep the
     # test-only cloud origin on loopback HTTP there; Linux CI exercises HTTPS.
-    use_https = sys.platform.startswith("linux")
+    use_https = sys.platform.startswith("linux") and not public_http
+    development = not use_https and not public_http
     public = f"{'https' if use_https else 'http'}://127.0.0.1:{cloud_port}"
-    initialize_cloud(cloud_settings, public, password="integration-password-123", development=not use_https)
+    initialize_cloud(
+        cloud_settings,
+        public,
+        password="integration-password-123",
+        development=development,
+        allow_insecure_http=public_http,
+    )
     cloud = create_cloud(cloud_settings)
     host_settings = Settings(tmp_path / "host")
     host_settings.data.update(
@@ -112,7 +119,9 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
                 assert login.status_code == 200, login.text
                 admin.headers["x-csrf-token"] = login.json()["csrf"]
                 code = (await admin.post("/api/enrollment-codes", json={"role": "host"})).json()["code"]
-                await host.enroll(public, code, "Integration host", development=not use_https)
+                await host.enroll(
+                    public, code, "Integration host", development=development, allow_insecure_http=public_http
+                )
                 user_response = await admin.post(
                     "/api/users", json={"username": "consumer", "password": "consumer-password-123"}
                 )
@@ -120,7 +129,13 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
                 code = (
                     await admin.post("/api/enrollment-codes", json={"role": "client", "owner": owner})
                 ).json()["code"]
-                await agent.enroll(public, code, "Integration client", development=not use_https)
+                await agent.enroll(
+                    public,
+                    code,
+                    "Integration client",
+                    development=development,
+                    allow_insecure_http=public_http,
+                )
                 host.vault.update(
                     services={
                         "srv_demo": {

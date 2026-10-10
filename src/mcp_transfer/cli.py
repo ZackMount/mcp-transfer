@@ -16,12 +16,12 @@ import uvicorn
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server.stdio import stdio_server
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from .agent import Agent, HostAdapter, create_agent_app
 from .cloud import create_cloud, create_frp_plugin
 from .config import Settings, default_home, validate_cloud_url
-from .database import User, database
+from .database import OAuthCode, User, WebSession, database
 from .frp import FrpProcess, download_frp, write_frps
 from .protocol import proxy_server
 from .security import new_id, passwords
@@ -34,16 +34,31 @@ def initialize_cloud(
     username: str = "admin",
     password: str | None = None,
     development=False,
+    allow_insecure_http=False,
+    frp_port: int | None = None,
+    migrate_origin=False,
 ):
     settings.home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    public_url = validate_cloud_url(public_url, development)
-    if settings.data.get("cloud_url") and settings.data["cloud_url"] != public_url:
-        raise ValueError("Changing the public origin requires a credential migration, not re-initialization")
-    settings.data.update(role="cloud", cloud_url=public_url, development=development)
+    public_url = validate_cloud_url(public_url, development, allow_insecure_http)
+    origin_changed = bool(settings.data.get("cloud_url") and settings.data["cloud_url"] != public_url)
+    if origin_changed and not migrate_origin:
+        raise ValueError(
+            "Changing the public origin requires --migrate-origin; then update both agents' cloud URLs"
+        )
+    if frp_port is not None:
+        if not 1 <= frp_port <= 65535:
+            raise ValueError("frp port must be between 1 and 65535")
+        settings.data["frp_port"] = frp_port
+    settings.data.update(
+        role="cloud", cloud_url=public_url, development=development, allow_insecure_http=allow_insecure_http
+    )
     settings.save()
     db = database(settings.database_url)
     generated = None
     with db.begin() as session:
+        if origin_changed:
+            session.execute(delete(WebSession))
+            session.execute(delete(OAuthCode))
         if not session.scalar(select(User).limit(1)):
             generated = password or secrets.token_urlsafe(24)
             if len(generated) < 12:
@@ -59,6 +74,10 @@ def initialize_cloud(
 async def run_cloud(settings: Settings, no_frp=False):
     if settings.data.get("role") != "cloud":
         raise ValueError("Run cloud-init before starting the cloud service")
+    if settings.cloud_url != settings.data.get("cloud_url"):
+        raise ValueError(
+            "Configured origin differs from saved identity; run cloud-init --migrate-origin first"
+        )
     write_frps(settings)
     main = uvicorn.Server(
         uvicorn.Config(
@@ -189,12 +208,16 @@ def main():
     init.add_argument("--public-url", required=True)
     init.add_argument("--username", default="admin")
     init.add_argument("--development", action="store_true")
+    init.add_argument("--allow-insecure-http", action="store_true")
+    init.add_argument("--frp-port", type=int)
+    init.add_argument("--migrate-origin", action="store_true")
     cloud = sub.add_parser("cloud")
     cloud.add_argument("--no-frp", action="store_true")
     for role in ("host", "client"):
         cmd = sub.add_parser(role)
         cmd.add_argument("--port", type=int)
         cmd.add_argument("--development", action="store_true")
+        cmd.add_argument("--allow-insecure-http", action="store_true", default=None)
         cmd.add_argument("--no-frp", action="store_true")
     connect = sub.add_parser("connect")
     connect.add_argument("--server", required=True)
@@ -214,6 +237,9 @@ def main():
                 args.username,
                 os.environ.get("MCPT_ADMIN_PASSWORD"),
                 args.development,
+                allow_insecure_http=args.allow_insecure_http,
+                frp_port=args.frp_port,
+                migrate_origin=args.migrate_origin,
             )
             print("Cloud initialized: " + args.public_url)
             if password:
@@ -227,6 +253,8 @@ def main():
                     raise ValueError("Port must be 1024–65535")
                 settings.data["ui_port"] = args.port
             settings.data["development"] = args.development
+            if args.allow_insecure_http is not None:
+                settings.data["allow_insecure_http"] = args.allow_insecure_http
             settings.save()
             asyncio.run(run_agent(settings, args.command, args.no_frp))
         elif args.command == "connect":

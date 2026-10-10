@@ -2,12 +2,12 @@
 
 自托管的 MCP 服务共享平台：**Linux 云端 + Windows 主机端 + Windows 客户端**，三端均提供 WebUI。
 
-主机端将本机 HTTP、stdio 或旧 SSE MCP 接入平台，frp 只把主机适配入口映射到云服务器的 loopback。公司客户端只向云端发起 HTTPS 请求，再向本机 AI 应用提供 MCP 接口；不使用 VPN、虚拟网卡、Tailscale 或公司内网入站连接。
+主机端将本机 HTTP、stdio 或旧 SSE MCP 接入平台，frp 只把主机适配入口映射到云服务器的 loopback。公司客户端向云端发起 HTTP(S) 请求，再向本机 AI 应用提供 MCP 接口；不使用 VPN、虚拟网卡、Tailscale 或公司内网入站连接。
 
 界面预览：[云端](docs/cloud-ui.jpg) · [主机端](docs/host-ui.jpg) · [客户端](docs/client-ui.jpg)。截图来自本地验证环境，不代表已部署到你的云服务器。
 
 ```text
-AI 应用 → 本机 stdio 桥 / HTTP 映射 → 云端 HTTPS 鉴权网关
+AI 应用 → 本机 stdio 桥 / HTTP 映射 → 云端 HTTP(S) 鉴权网关
                                       ↓
                          frps 的 127.0.0.1 私有映射
                                       ↓ 已建立的反向通道
@@ -24,7 +24,7 @@ AI 应用 → 本机 stdio 桥 / HTTP 映射 → 云端 HTTPS 鉴权网关
 - 客户端服务目录同步、批量订阅、单端口多路径映射、后台续期。
 - 通用 JSON、Cursor、VS Code、Claude Desktop 和 Codex TOML 配置生成；预览差异、备份、原子写入和可选自动同步。
 - stdio 导出不包含云端密钥；HTTP 导出使用独立的本地映射令牌。
-- Windows 当前用户后台任务、自启动、DPAPI 凭证保护；云端 Docker Compose、PostgreSQL、Caddy 自动 HTTPS。
+- Windows 当前用户后台任务、自启动、DPAPI 凭证保护；云端 Docker Compose、PostgreSQL、可选 HTTPS / 显式 HTTP 与自定义公网端口。
 
 ## 一行部署
 
@@ -38,7 +38,7 @@ AI 应用 → 本机 stdio 桥 / HTTP 映射 → 云端 HTTPS 鉴权网关
 gh repo clone ZackMount/mcp-transfer && sudo bash mcp-transfer/scripts/install-cloud.sh
 ```
 
-安装时输入已解析到云服务器的域名，例如 `mcp.example.com`。也可以预先指定：
+安装时输入完整入口地址，例如 `https://mcp.example.com`。HTTPS 域名需要先解析到云服务器，也可以预先指定：
 
 ```bash
 gh repo clone ZackMount/mcp-transfer && sudo bash mcp-transfer/scripts/install-cloud.sh --domain mcp.example.com
@@ -46,13 +46,47 @@ gh repo clone ZackMount/mcp-transfer && sudo bash mcp-transfer/scripts/install-c
 
 Ubuntu 24.04 会自动安装 Docker 与 Compose；其他 Linux 发行版需要先安装 Docker Engine 和 Compose v2。该部署使用 Linux host networking，不适用于 Docker Desktop 的默认网络模式。
 
-必须先配置 DNS，并在云安全组 / 防火墙放行：
+默认 HTTPS 部署需要配置 DNS，并在云安全组 / 防火墙放行：
 
 - **TCP 80、443**：HTTPS 证书申请、管理界面及客户端连接。
 - **TCP 7000**：主机 frpc 接入，需要设备认证及客户端证书。
 - **不要放行** 17800、17900、15432、21000–21999；它们仅用于云服务器内部通信。
 
-安装结束会显示初始管理员密码，只在首次初始化时生成。访问 `https://你的域名`，登录后启用 MFA。不要在初始化后直接更换公网域名，它同时是令牌 issuer，需要迁移凭证。
+安装结束会显示初始管理员密码，只在首次初始化时生成。访问输出的控制台地址，登录后启用 MFA。已有部署的地址变更应使用下方迁移参数，不要只手改 `.env`。
+
+### 自定义端口与 HTTP（v0.1.1）
+
+WebUI 和 MCP API 共用一个公网入口端口，frp 使用另一个独立端口。示例选择 **18080** 与 **17000**；换成你要使用的端口即可。内部 17800、17900、15432、21000–21999 不对外开放，也不能拿来作为公网入口。
+
+首次部署，替换示例 IP 后运行：
+
+```bash
+gh repo clone ZackMount/mcp-transfer && sudo bash mcp-transfer/scripts/install-cloud.sh --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http
+```
+
+该模式无需域名和 HTTPS 证书，只需放行所选的 TCP 18080、17000，不会额外开启本服务的 80/443，也不会自动跳转 HTTPS。`--allow-insecure-http` 必须显式指定；选择 HTTP 后，后续无参数升级会保留已选择的模式。
+
+**公网 HTTP 会明文传输登录密码、刷新凭证、访问 Token 和 MCP 内容，可能被窃听或篡改。** 更换端口无法消除这个风险；frp TLS 和网关到主机的 mTLS 继续保留，但不能保护客户端到公网 HTTP 入口这一段。此模式不满足标准 OAuth/MCP 授权的 HTTPS 安全要求，部分第三方直连客户端可能拒绝 HTTP；平台自己的客户端代理支持该模式。
+
+已有部署更换地址、协议或公网入口端口，在源码目录运行：
+
+```bash
+git pull --ff-only && sudo bash scripts/install-cloud.sh --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http --migrate-origin
+```
+
+迁移会备份 `.env`、保留管理员、用户、服务、授权、设备身份和签名 / CA 密钥，清理旧 Web 登录会话和待兑换授权码，并重启入口与云服务。进行中的调用会中断，不会自动重放；初始管理员密码不会重新生成。
+
+两台 Windows 都要更新到 v0.1.1：在已下载的源码目录 `git pull --ff-only`，重新运行原角色的安装脚本。然后分别在本地 WebUI 的「设置 → 更改云端入口」填写完整新地址，并勾选「允许明文 HTTP」。无需重新生成接入码，原服务定义和本地映射会保留。新登记设备则在首次连接页面勾选同一选项；安装脚本也支持 `-AllowInsecureHttp`。
+
+若仅修改 frp 端口而保持公网 Web 地址不变，使用 `sudo bash scripts/install-cloud.sh --frp-port 17000`；升级后的主机端会在下一次心跳自动获取新端口并重连，客户端不需要修改地址。
+
+原 HTTPS 域名可能已经被浏览器缓存了 HSTS，从而强制升级为 HTTPS。改用 IP 或新主机名可避开旧域名的 HSTS 状态；不要通过关闭整个浏览器的安全保护来解决。云主机上的其他服务及其端口不会由本安装器自动关闭。
+
+只查看最终参数、不执行部署：
+
+```bash
+bash scripts/install-cloud.sh --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http --print-config
+```
 
 ### 主机端 · Windows
 
@@ -127,7 +161,7 @@ WebUI 和 MCP 路由共用监听端口，但使用不同的认证方式：WebUI 
 - 刷新凭证每次轮换，默认 30 天闲置期限及 90 天设备授权绝对期限。过期需重新登记；并非永久万能 Token。
 - Windows 私密数据使用当前用户 DPAPI，运行任务也是同一用户；frpc 使用的证书、私钥和客户端凭证配置必须落盘，安装器将目录 ACL 限制到此用户和 SYSTEM。Unix 开发环境依靠文件权限。
 - 本机管理员或当前用户已经失陷时，代理不能保护其所有能力。原 MCP 应使用最小文件 / 数据库 / 进程权限。
-- 公司客户端需获准访问云域名的 HTTPS / SSE。支持显式 HTTP(S) 代理及企业 CA 文件；不自动绕过代理、导入根证书、修改路由或关闭 TLS 验证。Windows PAC / 集成认证未自动适配。
+- 公司客户端需获准访问配置的云地址、端口及流式响应；选择自定义 HTTP 端口并不意味着公司出口一定放行。支持显式 HTTP(S) 代理及企业 CA 文件；不自动绕过代理、导入根证书、修改路由或关闭 TLS 证书验证。Windows PAC / 集成认证未自动适配。
 - 当前发布为**单云节点、单 Python worker**部署；旧协议会话路由和本机会话位于内存，云端重启会中断这些会话。不要自行增加 Uvicorn workers。
 
 ## 更新、日志与卸载
@@ -162,7 +196,7 @@ MCPT_E2E=1 .venv/bin/pytest tests/test_e2e.py -q
 .venv/bin/python -m build
 ```
 
-集成测试下载固定版本 frp，启动真实 mTLS、frps/frpc 和 MCP 子进程，验证新旧协议、工具过滤、调用与设备撤销。GitHub Actions 在 Windows/Linux 运行测试，在 Linux 额外验证公网侧 HTTPS 和 Docker 构建。Windows/macOS 的测试专用云端入口使用 loopback HTTP，因为 Go 的系统证书库不会读取测试的 SSL_CERT_FILE；frp 和内部适配连接仍验证 mTLS。生产部署始终使用 HTTPS。不要把未通过这些测试的修改直接部署到生产机器。
+集成测试下载固定版本 frp，启动真实 mTLS、frps/frpc 和 MCP 子进程，验证新旧协议、工具过滤、调用与设备撤销。另有显式 HTTP 模式、地址迁移和端口更新用例。GitHub Actions 在 Windows/Linux 运行测试，在 Linux 额外验证公网侧 HTTPS、Caddy 自定义 HTTP 监听与 Docker 构建。Windows/macOS 的测试专用 HTTPS 场景改用 loopback HTTP，因为 Go 的系统证书库不会读取测试的 SSL_CERT_FILE；frp 和内部适配连接仍验证 mTLS。不要把未通过这些测试的修改直接部署到生产机器。
 
 本机试运行云端：
 
@@ -171,4 +205,4 @@ MCPT_E2E=1 .venv/bin/pytest tests/test_e2e.py -q
 .venv/bin/mcp-transfer --home ./data/dev-cloud cloud --no-frp
 ```
 
-开发模式 HTTP 只允许 loopback；生产设备接入必须使用 HTTPS。
+`--development` 仍然只放行 loopback HTTP。其他 HTTP 入口需要独立的 `--allow-insecure-http`，不能借开发模式隐式放开。

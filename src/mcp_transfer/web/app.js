@@ -66,7 +66,7 @@ async function loginScreen() {
     await api("/api/auth/login", "POST", values); state.me = await api("/api/me"); state.csrf = state.me.csrf; await render();
   });
   node.className = "stack";
-  app.replaceChildren(el("div", { class: "login" }, el("div", { class: "brand" }, "MCP Transfer"), node,
+  app.replaceChildren(el("div", { class: "login" }, el("div", { class: "brand" }, "MCP Transfer"), state.insecure_http ? el("div", { class: "message" }, "云端使用明文 HTTP，密码、Token 和调用内容没有传输加密。") : null, node,
     el("p", { class: "small" }, cloud ? "初始管理员密码由云端部署命令生成。建议登录后启用动态验证码。" : "密码在首次安装时显示，也可使用安装目录中的“查看访问密码”命令获取。它只用于本机 WebUI。")));
 }
 
@@ -75,11 +75,11 @@ async function overview(main) {
     const [devices, services] = await Promise.all([api("/api/devices"), api("/api/servers")]);
     main.append(el("div", { class: "grid" }, [["已登记设备", devices.length], ["在线设备", devices.filter(x => x.active && x.online).length], ["已发布服务", services.filter(x => x.enabled).length]].map(([label, count]) => el("div", { class: "panel" }, el("div", { class: "stat" }, count), el("span", { class: "muted" }, label)))));
     main.append(panel("开始连接你的设备", el("p", {}, "先在设备页生成主机接入码，在主机 WebUI 登记并发布服务；再登记客户端并授予服务访问权限。接入码 5 分钟有效，每台设备独立登记。"), el("div", { class: "row" }, action("登记设备", () => navigate("devices"), "primary"), action("管理授权", () => navigate("grants")))));
-    main.append(panel("连接边界", el("p", {}, "客户端只通过 HTTPS 连接本控制中心。frp 的业务映射端口只监听云服务器内部地址，原始 MCP 不直接暴露到公网。"), el("p", { class: "small" }, "云端是受信中转，会处理 MCP 调用内容。审计默认记录调用身份、服务、方法及状态，不保存工具参数或结果正文。")));
+    main.append(panel("连接边界", el("p", {}, "客户端通过配置的云端入口访问服务。frp 的业务映射端口只监听云服务器内部地址，原始 MCP 不直接暴露到公网。"), el("p", { class: "small" }, "云端是受信中转，会处理 MCP 调用内容。审计默认记录调用身份、服务、方法及状态，不保存工具参数或结果正文。")));
   } else {
     const status = await api("/api/status");
     main.append(panel("连接状态", el("div", { class: "row spread" }, el("div", {}, badge(status.status, status.status === "已连接"), el("p", {}, status.cloud_url || "尚未连接云端"), el("code", {}, status.device_id || "待登记设备")), action("立即同步", async () => { await api("/api/sync", "POST", {}); await render(); }, "primary"))));
-    if (!status.device_id) main.append(form("首次连接云端", [input("云端地址", "cloud_url", "url", "", "例如 https://mcp.example.com"), input("设备名称", "name", "text", state.role === "host" ? "我的 MCP 主机" : "我的工作电脑"), input("一次性接入码", "code", "password")], "连接并登记", async data => { await api("/api/configure", "POST", data); toast("设备已登记"); await render(); }));
+    if (!status.device_id) main.append(form("首次连接云端", [input("云端地址", "cloud_url", "url", "", "例如 https://mcp.example.com"), input("设备名称", "name", "text", state.role === "host" ? "我的 MCP 主机" : "我的工作电脑"), input("一次性接入码", "code", "password"), check("允许明文 HTTP（密码、Token 和调用内容没有传输加密）", "allow_insecure_http", status.allow_insecure_http)], "连接并登记", async data => { data.allow_insecure_http = data.allow_insecure_http === "on"; await api("/api/configure", "POST", data); toast("设备已登记"); await render(); }));
     else main.append(panel(state.role === "host" ? "发布你的 MCP 服务" : "把远程服务带到本机", el("p", {}, state.role === "host" ? "在 MCP 服务页添加 HTTP、stdio 或旧 SSE 服务。stdio 测试会启动配置的程序，导入的服务默认停用。" : "同步已授权目录后，可以一次订阅全部服务，生成应用配置。云端令牌由后台管理，不必填入 AI 应用。"), action(state.role === "host" ? "添加服务" : "查看可用服务", () => navigate("servers"), "primary")));
     if (state.role === "host") main.append(panel("运行信息", el("p", {}, `frp 进程：${status.frp_running ? "运行中" : "未运行"} · MCP 适配实例：${status.adapter_processes}`), el("p", { class: "small" }, "frp 进程运行不等于隧道一定可用，请结合云端状态和实际调用检查。需要桌面或浏览器的 MCP 应在当前用户会话中运行。")));
   }
@@ -184,6 +184,11 @@ async function settingsPage(main) {
     }, "primary"));
     main.append(box);
   } else {
+    const status = await api("/api/status");
+    if (status.device_id) main.append(form("更改云端入口", [input("云端完整地址（含协议与端口）", "cloud_url", "url", status.cloud_url || ""), check("允许明文 HTTP（密码、Token 和调用内容没有传输加密）", "allow_insecure_http", status.allow_insecure_http)], "保存地址并重新连接", async data => {
+      data.allow_insecure_http = data.allow_insecure_http === "on";
+      await api("/api/connection", "PUT", data); toast("连接已更新，设备身份与服务映射保留"); await render();
+    }));
     main.append(form("企业网络设置", [input("批准使用的 HTTP(S) 代理（可选）", "proxy", "text", "", "例如 http://proxy.company.example:8080"), input("企业 CA 文件完整路径（可选）", "enterprise_ca", "text", "", "保留证书校验；不会自动绕过企业代理或安全策略。")], "保存网络设置", async data => { await api("/api/network", "POST", data); toast("设置已保存，下一次连接生效"); }));
     main.append(panel("本地运行", el("p", {}, "客户端和主机端都以当前 Windows 用户后台运行。重启后随登录启动；本机 WebUI 与映射端口不会监听局域网。"), el("p", {}, "如需不同映射端口，可在首次启动时使用 --port 参数。每个服务在该端口下有独立的 /mcp/{server_id} 路径。")));
   }
@@ -192,16 +197,18 @@ async function settingsPage(main) {
 async function navigate(page) { state.page = page; await render(); }
 async function render() {
   if (!state.me) return loginScreen();
+  const connectionInfo = await api("/api/info");
   const available = state.role === "cloud" ? ["overview", "servers", "devices", "grants", ...(state.me.admin ? ["users"] : []), "audit", "settings"] : ["overview", "servers", ...(state.role === "client" ? ["exports"] : []), "settings"];
   if (!available.includes(state.page)) state.page = "overview";
   const main = el("main", { class: "main" }, el("header", { class: "topbar" }, el("div", {}, el("h1", {}, pages[state.page]), el("span", { class: "muted" }, titles[state.role])), el("div", { class: "row" }, action("刷新", render), action("退出", async () => { await api("/api/auth/logout", "POST", {}); state.me = null; state.csrf = ""; await render(); }))));
   app.replaceChildren(el("div", { class: "shell" }, el("aside", { class: "sidebar" }, el("div", {}, el("div", { class: "brand" }, "MCP Transfer"), el("div", { class: "subtitle" }, titles[state.role])), el("nav", { class: "nav" }, available.map(page => action(pages[page], () => navigate(page), page === state.page ? "active" : ""))), el("footer", {}, "Private connections. Explicit access.", el("br"), "v" + state.version)), main));
+  if (connectionInfo.insecure_http) main.append(el("div", { class: "message" }, "当前云端入口使用明文 HTTP。登录密码、Token 和 MCP 内容可被网络中间方读取或修改；frp 的内部加密不能保护这一段连接。"));
   const handlers = { overview, servers: serversPage, devices: devicesPage, grants: grantsPage, users: usersPage, exports: exportsPage, audit: auditPage, settings: settingsPage };
   try { await handlers[state.page](main); } catch (error) { main.append(el("div", { class: "message" }, error.message)); }
 }
 async function start() {
   try {
-    const info = await api("/api/info"); state.role = info.role; state.version = info.version;
+    const info = await api("/api/info"); state.role = info.role; state.version = info.version; state.insecure_http = info.insecure_http;
     try { state.me = await api("/api/me"); state.csrf = state.me.csrf; } catch { state.me = null; }
     await render();
   } catch (error) { app.replaceChildren(el("div", { class: "login" }, el("h1", {}, "无法连接本地服务"), el("p", {}, error.message), action("重试", start, "primary"))); }

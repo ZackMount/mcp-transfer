@@ -100,7 +100,9 @@ class PKI:
         cert_path = self.home / f"{stem}.crt"
         if cert_path.exists():
             existing = x509.load_pem_x509_certificate(cert_path.read_bytes())
-            if existing.not_valid_after_utc > dt.datetime.now(dt.UTC) + dt.timedelta(days=7):
+            existing_names = existing.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+            names_match = {str(item.value) for item in existing_names} == set(names)
+            if names_match and existing.not_valid_after_utc > dt.datetime.now(dt.UTC) + dt.timedelta(days=7):
                 return
         key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
         csr = (

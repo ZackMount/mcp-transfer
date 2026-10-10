@@ -28,13 +28,18 @@ def atomic_write(path: Path, content: str | bytes, mode: int = 0o600) -> None:
             os.unlink(temporary)
 
 
-def validate_cloud_url(value: str, development: bool = False) -> str:
+def validate_cloud_url(value: str, development: bool = False, allow_insecure_http: bool = False) -> str:
+    if not value or any(character.isspace() or ord(character) < 32 for character in value) or "\\" in value:
+        raise ValueError("Cloud URL cannot contain whitespace, control characters or backslashes")
     url = urlsplit(value)
+    if url.port is not None and not 1 <= url.port <= 65535:
+        raise ValueError("Cloud port must be between 1 and 65535")
     local = url.hostname in {"127.0.0.1", "localhost", "::1"}
     if url.username or url.password or url.query or url.fragment or url.path not in {"", "/"}:
         raise ValueError("Cloud URL must be an origin, without credentials, path or query")
-    if not url.hostname or (url.scheme != "https" and not (development and local and url.scheme == "http")):
-        raise ValueError("Cloud URL must use HTTPS (localhost HTTP requires --development)")
+    http_allowed = url.scheme == "http" and (allow_insecure_http or (development and local))
+    if not url.hostname or (url.scheme != "https" and not http_allowed):
+        raise ValueError("HTTP requires explicit --allow-insecure-http consent; otherwise use HTTPS")
     return value.rstrip("/")
 
 
@@ -60,3 +65,10 @@ class Settings:
     @property
     def database_url(self) -> str:
         return os.environ.get("DATABASE_URL", f"sqlite:///{self.home / 'cloud.db'}")
+
+    @property
+    def frp_port(self) -> int:
+        value = int(self.data.get("frp_port", 7000))
+        if not 1 <= value <= 65535:
+            raise ValueError("frp port must be between 1 and 65535")
+        return value

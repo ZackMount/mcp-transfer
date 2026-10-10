@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import delete, or_, select, update
 
 from . import __version__
-from .config import Settings
+from .config import Settings, validate_cloud_url
 from .database import (
     Audit,
     ConsumedRefresh,
@@ -50,7 +50,11 @@ from .security import (
 def create_cloud(settings: Settings) -> FastAPI:
     settings.home.mkdir(parents=True, exist_ok=True, mode=0o700)
     db = database(settings.database_url)
-    public = settings.cloud_url.rstrip("/")
+    public = validate_cloud_url(
+        settings.cloud_url,
+        settings.data.get("development", False),
+        settings.data.get("allow_insecure_http", False),
+    )
     origin = urlsplit(public)
     signer = Signer(settings.home, public)
     pki = PKI(settings.home)
@@ -148,7 +152,12 @@ def create_cloud(settings: Settings) -> FastAPI:
 
     @app.get("/api/info")
     async def info():
-        return {"role": "cloud", "version": __version__, "cloud_url": public}
+        return {
+            "role": "cloud",
+            "version": __version__,
+            "cloud_url": public,
+            "insecure_http": origin.scheme == "http",
+        }
 
     @app.post("/api/auth/login")
     async def login(request: Request):
@@ -364,7 +373,7 @@ def create_cloud(settings: Settings) -> FastAPI:
             "remote_port": device.port,
             "frp_secret": frp_secret if device.role == "host" else None,
             "frp_server": origin.hostname,
-            "frp_port": int(settings.data.get("frp_port", 7000)),
+            "frp_port": settings.frp_port,
         }
 
     def refresh_device(refresh: str, resource: str | None = None):
@@ -430,6 +439,17 @@ def create_cloud(settings: Settings) -> FastAPI:
         with db.begin() as session:
             session.get(Device, device.id).last_seen = time.time()
         return {"ok": True}
+
+    @app.get("/api/devices/connection")
+    async def connection_details(request: Request):
+        device = device_request(request)
+        return {
+            "device_id": device.id,
+            "frp_server": origin.hostname,
+            "frp_port": settings.frp_port,
+            "remote_port": device.port,
+            "signing_public_key": signer.public_pem,
+        }
 
     @app.post("/api/devices/certificate")
     async def certificate(request: Request):

@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][ValidateSet('host','client')][string]$Role,
-    [int]$Port = 0
+    [int]$Port = 0,
+    [switch]$AllowInsecureHttp
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -42,6 +43,7 @@ if ($Port -eq 0) { if ($Role -eq 'host') { $Port = 17810 } else { $Port = 17820 
 if ($Port -lt 1024 -or $Port -gt 65535) { throw 'Port must be between 1024 and 65535.' }
 $PythonW = Join-Path $RuntimeRoot 'Scripts\pythonw.exe'
 $Arguments = "-m mcp_transfer --home `"$DataRoot`" $Role --port $Port"
+if ($AllowInsecureHttp) { $Arguments += ' --allow-insecure-http' }
 $TaskAction = New-ScheduledTaskAction -Execute $PythonW -Argument $Arguments -WorkingDirectory $InstallRoot
 $Trigger = New-ScheduledTaskTrigger -AtLogOn -User $Identity
 $Principal = New-ScheduledTaskPrincipal -UserId $Identity -LogonType Interactive -RunLevel Limited

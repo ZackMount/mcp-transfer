@@ -46,6 +46,7 @@ class Agent:
         self.access = ""
         self.access_expires = 0
         self.refresh_lock = asyncio.Lock()
+        self.connection_lock = asyncio.Lock()
         self.resource_tokens = {}
         self.catalog = []
         self.synced_at = 0.0
@@ -70,17 +71,19 @@ class Agent:
             options["verify"] = ssl.create_default_context(cafile=ca)
         return httpx.AsyncClient(**options)
 
-    async def enroll(self, cloud_url: str, code: str, name: str, development=False):
+    async def enroll(
+        self, cloud_url: str, code: str, name: str, development=False, allow_insecure_http=False
+    ):
         if self.settings.data.get("device_id"):
             raise ValueError(
                 "Device already enrolled. Revoke it in the cloud and use a new profile to re-enroll."
             )
-        cloud_url = validate_cloud_url(cloud_url, development)
+        cloud_url = validate_cloud_url(cloud_url, development, allow_insecure_http)
         payload = {"code": code, "name": name}
         if self.role == "host":
             payload["csr"] = make_csr(self.settings.home, "pending-host")
         async with self.cloud_http() as client:
-            response = await client.post(cloud_url + "/api/devices/enroll", json=payload)
+            response = await client.post(cloud_url + "/api/devices/enroll", json=payload, timeout=20)
             response.raise_for_status()
             result = response.json()
         if result["role"] != self.role:
@@ -92,7 +95,9 @@ class Agent:
                 for k in ("device_id", "role", "remote_port", "frp_server", "frp_port", "signing_public_key")
             }
         )
-        self.settings.data.update(cloud_url=cloud_url, name=name, development=development)
+        self.settings.data.update(
+            cloud_url=cloud_url, name=name, development=development, allow_insecure_http=allow_insecure_http
+        )
         self.settings.save()
         atomic_write(self.settings.home / "ca.crt", result["ca"])
         if result.get("certificate"):
@@ -109,10 +114,20 @@ class Agent:
                 raise ValueError("Agent is not enrolled")
             async with self.cloud_http() as client:
                 response = await client.post(
-                    self.settings.data["cloud_url"] + "/api/token", json={"refresh_token": refresh}
+                    self.settings.data["cloud_url"] + "/api/token",
+                    json={"refresh_token": refresh},
+                    timeout=20,
                 )
                 response.raise_for_status()
                 data = response.json()
+            claims = verify_token(
+                data["access_token"],
+                self.settings.data["signing_public_key"],
+                self.settings.data["cloud_url"],
+                "cloud-api",
+            )
+            if claims["sub"] != self.settings.data["device_id"] or claims.get("kind") != "device":
+                raise ValueError("Cloud returned credentials for a different device")
             # Persist the rotated secret before making another request.
             self.vault.update(refresh_token=data["refresh_token"])
             self.access = data["access_token"]
@@ -126,17 +141,55 @@ class Agent:
                 method,
                 self.settings.data["cloud_url"] + path,
                 headers={"authorization": "Bearer " + token},
+                timeout=20,
                 **kwargs,
             )
             response.raise_for_status()
             return response.json()
 
+    async def update_connection(self, cloud_url: str, allow_insecure_http=False):
+        cloud_url = validate_cloud_url(
+            cloud_url, self.settings.data.get("development", False), allow_insecure_http
+        )
+        async with self.connection_lock:
+            async with self.refresh_lock:
+                self.settings.data.update(cloud_url=cloud_url, allow_insecure_http=allow_insecure_http)
+                self.settings.save()
+                self.access = ""
+                self.access_expires = 0
+                self.resource_tokens.clear()
+                self.synced_at = 0
+                self.published.clear()
+            await self.frp.stop()
+            for actor in list(self.actors.values()):
+                await actor.close()
+            self.actors.clear()
+            await self._tick()
+
     async def tick(self):
+        async with self.connection_lock:
+            await self._tick()
+
+    async def _tick(self):
         if not self.settings.data.get("device_id"):
             return
         await self.api("POST", "/api/devices/heartbeat")
         if self.role == "host":
             from cryptography import x509
+
+            details = await self.api("GET", "/api/devices/connection")
+            if (
+                details["device_id"] != self.settings.data["device_id"]
+                or details["signing_public_key"] != self.settings.data["signing_public_key"]
+            ):
+                raise ValueError("Cloud identity does not match the enrolled server")
+            fields = ("frp_server", "frp_port", "remote_port")
+            if any(details[key] != self.settings.data.get(key) for key in fields):
+                self.settings.data.update({key: details[key] for key in fields})
+                self.settings.save()
+                await self.frp.stop()
+            # Also refresh the token endpoint after a public URL change.
+            write_frpc(self.settings, self.vault.read())
 
             certificate = x509.load_pem_x509_certificate((self.settings.home / "device.crt").read_bytes())
             if certificate.not_valid_after_utc.timestamp() < time.time() + 7 * 86400:
@@ -313,7 +366,11 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
 
     @app.get("/api/info")
     async def info():
-        return {"role": agent.role, "version": __version__}
+        return {
+            "role": agent.role,
+            "version": __version__,
+            "insecure_http": agent.settings.data.get("cloud_url", "").startswith("http://"),
+        }
 
     @app.post("/api/auth/login")
     async def login(request: Request):
@@ -347,6 +404,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             "status": agent.status,
             "device_id": agent.settings.data.get("device_id"),
             "cloud_url": agent.settings.data.get("cloud_url"),
+            "allow_insecure_http": bool(agent.settings.data.get("allow_insecure_http")),
             "frp_running": bool(agent.frp.process and agent.frp.process.returncode is None),
             "port": agent.port,
             "subscribe_all": bool(agent.settings.data.get("subscribe_all")),
@@ -366,10 +424,28 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
                 body.get("code", ""),
                 body.get("name", "Device"),
                 bool(agent.settings.data.get("development")),
+                bool(body.get("allow_insecure_http", agent.settings.data.get("allow_insecure_http", False))),
             )
             await agent.tick()
         except (ValueError, httpx.HTTPError) as error:
             raise HTTPException(400, str(error)[:300]) from error
+        return {"ok": True}
+
+    @app.put("/api/connection")
+    async def update_connection(request: Request):
+        local_user(request)
+        body = await request.json()
+        try:
+            await agent.update_connection(
+                body.get("cloud_url", ""), bool(body.get("allow_insecure_http", False))
+            )
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        except (HTTPException, httpx.HTTPError) as error:
+            raise HTTPException(
+                503,
+                "Address saved, but connection failed. Check the cloud address and retry synchronization.",
+            ) from error
         return {"ok": True}
 
     @app.post("/api/network")

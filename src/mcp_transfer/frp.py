@@ -67,7 +67,7 @@ def q(value):
 def write_frps(settings: Settings):
     directory = settings.home / "pki"
     content = f"""bindAddr = "0.0.0.0"
-bindPort = {int(settings.data.get("frp_port", 7000))}
+bindPort = {settings.frp_port}
 proxyBindAddr = "127.0.0.1"
 allowPorts = [{{ start = 21000, end = 21999 }}]
 maxPortsPerClient = 1

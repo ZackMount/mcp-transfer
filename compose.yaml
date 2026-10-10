@@ -24,7 +24,7 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      MCPT_PUBLIC_URL: https://${MCPT_DOMAIN:?Run scripts/install-cloud.sh first}
+      MCPT_PUBLIC_URL: ${MCPT_PUBLIC_URL:?Run scripts/install-cloud.sh first}
       DATABASE_URL: postgresql+psycopg://mcpt:${MCPT_DB_PASSWORD}@127.0.0.1:15432/mcpt
     volumes:
       - ./data/cloud:/data
@@ -42,7 +42,7 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      MCPT_DOMAIN: ${MCPT_DOMAIN}
+      MCPT_PUBLIC_URL: ${MCPT_PUBLIC_URL}
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
