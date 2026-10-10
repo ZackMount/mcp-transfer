@@ -107,6 +107,11 @@ class Agent:
 
     async def cloud_access(self):
         async with self.refresh_lock:
+            validate_cloud_url(
+                self.settings.data.get("cloud_url", ""),
+                self.settings.data.get("development", False),
+                self.settings.data.get("allow_insecure_http", False),
+            )
             if self.access and self.access_expires > time.time() + 30:
                 return self.access
             refresh = self.vault.read().get("refresh_token")

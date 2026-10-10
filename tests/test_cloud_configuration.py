@@ -47,6 +47,15 @@ def test_http_opt_in_does_not_disable_url_validation(url):
         validate_cloud_url(url, allow_insecure_http=True)
 
 
+async def test_manually_edited_http_profile_is_rejected_before_sending_credentials(tmp_path):
+    settings = Settings(tmp_path / "client")
+    settings.data["cloud_url"] = "http://203.0.113.10:18080"
+    agent = Agent(settings, "client")
+    agent.vault.update(refresh_token="must-not-be-transmitted")
+    with pytest.raises(ValueError, match="allow-insecure-http"):
+        await agent.cloud_access()
+
+
 def test_origin_migration_preserves_identity_and_invalidates_browser_sessions(cloud):
     client, old_app, settings = cloud
     device = enroll(client)
