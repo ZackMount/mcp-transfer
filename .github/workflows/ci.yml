@@ -5,6 +5,21 @@ on:
 permissions:
   contents: read
 jobs:
+  ubuntu-2204-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Jammy dependency setup with an existing Ubuntu Docker installation
+        run: |
+          docker run --rm -v "$PWD:/workspace:ro" -v /var/run/docker.sock:/var/run/docker.sock ubuntu:22.04 bash -c '
+            set -euo pipefail
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates docker.io
+            before_version="$(docker --version)"
+            . /workspace/scripts/ensure-docker.sh
+            ensure_docker
+            test "$(docker --version)" = "$before_version"
+          '
   tests:
     strategy:
       matrix:

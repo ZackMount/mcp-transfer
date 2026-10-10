@@ -71,16 +71,8 @@ if [[ "$PRINT_CONFIG" == 1 ]]; then
   exit 0
 fi
 if [[ "$(uname -s)" != Linux || $EUID -ne 0 ]]; then printf 'Run this installer on Linux with sudo.\n' >&2; exit 1; fi
-if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1; then
-  if [[ -f /etc/os-release ]]; then . /etc/os-release; fi
-  if [[ "${ID:-}" == ubuntu && "${VERSION_ID:-}" == 24.04 ]]; then
-    apt-get update
-    apt-get install -y docker.io docker-compose-v2 ca-certificates curl openssl
-    systemctl enable --now docker
-  else
-    printf 'Install Docker Engine and Compose v2 first. Ubuntu 24.04 is provisioned automatically.\n' >&2; exit 1
-  fi
-fi
+. "$ROOT_DIR/scripts/ensure-docker.sh"
+ensure_docker
 umask 077
 if [[ -f .env ]]; then cp -p .env ".env.backup-$(date -u +%Y%m%d%H%M%S)"; else touch .env; fi
 update_env() {

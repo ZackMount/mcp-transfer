@@ -44,7 +44,9 @@ curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts
 curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash -s -- --domain mcp.example.com
 ```
 
-Ubuntu 24.04 会自动安装 Docker 与 Compose；其他 Linux 发行版需要先安装 Docker Engine 和 Compose v2。该部署使用 Linux host networking，不适用于 Docker Desktop 的默认网络模式。
+Ubuntu 22.04 / 24.04 会自动补齐 Docker、Compose 和 Buildx；已有 Docker 时只安装缺少的插件，并按现有 Ubuntu / Docker CE 包来源选择对应插件。其他 Linux 发行版需要先安装这些组件。该部署使用 Linux host networking，不适用于 Docker Desktop 的默认网络模式。
+
+如果 Ubuntu 22.04 提示 `docker: unknown command: docker compose`，缺的是 Compose 插件。在 Ubuntu 自带 Docker 的情况下，可以手工执行 `apt-get update && apt-get install -y --no-install-recommends docker-compose-v2 docker-buildx`，然后重新运行部署入口。更新后的入口已自动处理这一情况。Ubuntu 源需要包含 `jammy-updates` 的 `universe`；Docker CE 则使用其官方源中的 `docker-compose-plugin` / `docker-buildx-plugin`。
 
 默认 HTTPS 部署需要配置 DNS，并在云安全组 / 防火墙放行：
 
