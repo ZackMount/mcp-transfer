@@ -3,12 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
-DOMAIN=""; PUBLIC_URL=""; FRP_PORT=""; ALLOW_HTTP=""; MIGRATE=0; PRINT_CONFIG=0
+DOMAIN=""; PUBLIC_URL=""; FRP_PORT=""; ALLOW_HTTP=""; MIGRATE=0; PRINT_CONFIG=0; DOWNLOAD_PROXY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --domain) DOMAIN="${2:?--domain needs a domain}"; shift 2 ;;
     --public-url) PUBLIC_URL="${2:?--public-url needs a URL}"; shift 2 ;;
     --frp-port) FRP_PORT="${2:?--frp-port needs a port}"; shift 2 ;;
+    --download-proxy) DOWNLOAD_PROXY="${2:?--download-proxy needs an HTTP(S) proxy URL}"; shift 2 ;;
     --allow-insecure-http) ALLOW_HTTP=1; shift ;;
     --migrate-origin) MIGRATE=1; shift ;;
     --print-config) PRINT_CONFIG=1; shift ;;
@@ -16,10 +17,14 @@ while [[ $# -gt 0 ]]; do
       printf 'Usage: sudo bash scripts/install-cloud.sh [--domain NAME | --public-url URL] [--frp-port PORT] [--allow-insecure-http] [--migrate-origin]\n'
       printf 'HTTP example: --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http\n'
       printf 'Changing an existing public URL requires --migrate-origin; update both agents afterwards.\n'
+      printf 'Use --download-proxy http://127.0.0.1:17897 for a temporary frps download proxy; it is not saved. Docker image downloads need their own daemon proxy.\n'
       exit 0 ;;
     *) printf 'Unknown option: %s\n' "$1" >&2; exit 2 ;;
   esac
 done
+if [[ -n "$DOWNLOAD_PROXY" && ! "$DOWNLOAD_PROXY" =~ ^https?://[^[:space:]]+$ ]]; then
+  printf 'Download proxy must be an HTTP(S) URL without whitespace.\n' >&2; exit 2
+fi
 read_env() { if [[ -f .env ]]; then sed -n "s/^$1=//p" .env | tail -1; fi; }
 OLD_URL="$(read_env MCPT_PUBLIC_URL)"
 OLD_DOMAIN="$(read_env MCPT_DOMAIN)"
@@ -95,7 +100,30 @@ INIT_ARGS=(cloud-init --public-url "$PUBLIC_URL" --frp-port "$FRP_PORT")
 if [[ "$ALLOW_HTTP" == 1 ]]; then INIT_ARGS+=(--allow-insecure-http); fi
 if [[ "$MIGRATE" == 1 ]]; then INIT_ARGS+=(--migrate-origin); fi
 docker compose run --rm cloud "${INIT_ARGS[@]}"
+FRP_INSTALL=(docker compose run --rm)
+if [[ -n "$DOWNLOAD_PROXY" ]]; then
+  FRP_INSTALL+=(-e "HTTP_PROXY=$DOWNLOAD_PROXY" -e "HTTPS_PROXY=$DOWNLOAD_PROXY" -e 'NO_PROXY=localhost,127.0.0.1,::1')
+fi
+printf 'Preparing frps before starting the cloud gateway...\n'
+"${FRP_INSTALL[@]}" cloud install-frp --binary frps
 docker compose up -d --no-deps --force-recreate cloud caddy
+docker compose exec -T cloud python - <<'PY'
+import json
+import socket
+import time
+from pathlib import Path
+
+port = json.loads(Path('/data/settings.json').read_text())['frp_port']
+for attempt in range(30):
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=1):
+            print('Cloud frps listener is ready.')
+        break
+    except OSError:
+        time.sleep(1)
+else:
+    raise SystemExit('frps did not start. Inspect docker compose logs cloud and data/cloud/frps.log.')
+PY
 printf '\nControl panel: %s\nfrp host connection: %s:%s (TLS retained)\n' "$PUBLIC_URL" "$PUBLIC_HOST" "$FRP_PORT"
 if [[ "$SCHEME" == http ]]; then
   printf 'Allow inbound TCP %s and %s. This HTTP deployment does not require 80/443.\n' "$PUBLIC_PORT" "$FRP_PORT"

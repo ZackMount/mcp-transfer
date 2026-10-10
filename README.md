@@ -48,6 +48,10 @@ curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts
 
 Ubuntu 22.04 / 24.04 会自动补齐 Docker、Compose 和 Buildx；已有 Docker 时只安装缺少的插件，并按现有 Ubuntu / Docker CE 包来源选择对应插件。其他 Linux 发行版需要先安装这些组件。该部署使用 Linux host networking，不适用于 Docker Desktop 的默认网络模式。
 
+安装器会先下载并校验云端 frps，再启动网关并检查 frps 监听端口。frps 下载失败会中止部署，不能只凭 `Cloud initialized` 判断转发已经可用。
+
+如果云主机通过当前 SSH 连接临时使用 Mac 提供的 HTTP 代理，可以在部署命令最后加 `--download-proxy http://127.0.0.1:17897`。此参数只用于 frps 下载容器，不会保存到长期服务配置，也不控制 Docker 镜像拉取。镜像拉取仍需 Docker 后台服务代理。frps 下载到 `data/cloud/bin` 后，日常启动无需再下载。
+
 如果 Ubuntu 22.04 提示 `docker: unknown command: docker compose`，缺的是 Compose 插件。在 Ubuntu 自带 Docker 的情况下，可以手工执行 `apt-get update && apt-get install -y --no-install-recommends docker-compose-v2 docker-buildx`，然后重新运行部署入口。更新后的入口已自动处理这一情况。Ubuntu 源需要包含 `jammy-updates` 的 `universe`；Docker CE 则使用其官方源中的 `docker-compose-plugin` / `docker-buildx-plugin`。
 
 默认 HTTPS 部署需要配置 DNS，并在云安全组 / 防火墙放行：
@@ -153,6 +157,20 @@ WebUI 和 MCP 路由共用监听端口，但使用不同的认证方式：WebUI 
 ### 已连接但没有工具
 
 概览的「已连接」只说明设备成功与云端同步，主机在线也不能证明 MCP 程序或穿透链路可用。先在主机「测试工具」，再在客户端「检测工具」；检测会读取工具列表，不执行工具调用。主机显示 0 个工具时检查原 MCP 的启动方式和能力；主机有工具而客户端没有时检查云端工具授权。客户端检测失败时检查本机 `data/agent.log`、云端调用审计及主机的 `data/frpc.log`。
+
+云端没有 `data/cloud/frps.log` 时，先执行 `docker compose logs --tail=80 cloud`，确认 frps 是否下载失败。已有部署可在临时代理连通时单独下载，不需要重建镜像或重置账户：
+
+```bash
+cd /opt/mcp-transfer
+docker compose run --rm \
+  -e HTTP_PROXY=http://127.0.0.1:17897 \
+  -e HTTPS_PROXY=http://127.0.0.1:17897 \
+  -e NO_PROXY=localhost,127.0.0.1,::1 \
+  cloud install-frp --binary frps
+docker compose restart cloud
+```
+
+下载成功会输出 `/data/bin/frps`。这些代理环境变量只属于这次下载，退出容器后不用额外清理。云端日志和主机 frpc 日志仍需确认连接成功；主机的公网接入端口（本例 TCP 17000）需要在云主机防火墙和安全组放行。
 
 客户端能检测出工具而 Cursor 仍没有工具时，重新选择 **Cursor** 导出，通过「备份并写入配置」写入 `%USERPROFILE%\.cursor\mcp.json`，然后刷新或重启 Cursor。同时检查项目 `.cursor/mcp.json` 是否还有旧条目，以及 Cursor 的 MCP 输出日志。stdio 桥必须由安装时的同一 Windows 用户运行，才能读取该用户 DPAPI 保护的本地凭证。主机与客户端无需使用相同 Windows 用户。
 

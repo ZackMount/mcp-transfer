@@ -174,3 +174,20 @@ def test_installer_handles_legacy_env_and_requires_migration_consent(tmp_path):
             text=True,
         )
         assert result.returncode != 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Linux installer uses bash")
+def test_temporary_download_proxy_is_validated_without_persisting_it(tmp_path):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    target = scripts / "install-cloud.sh"
+    shutil.copyfile(Path(__file__).parents[1] / "scripts/install-cloud.sh", target)
+    args = ["bash", str(target), "--public-url", "http://203.0.113.10:18080",
+            "--allow-insecure-http", "--print-config", "--download-proxy"]
+    result = subprocess.run([*args, "http://127.0.0.1:17897"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "17897" not in result.stdout
+    assert not (tmp_path / ".env").exists()
+    for proxy in ["socks5://127.0.0.1:17897", "http://proxy\ninjected"]:
+        result = subprocess.run([*args, proxy], capture_output=True, text=True)
+        assert result.returncode == 2
