@@ -74,6 +74,10 @@ class Agent:
     def port(self):
         return int(self.settings.data.get("ui_port", 17810 if self.role == "host" else 17820))
 
+    @property
+    def route_prefix(self):
+        return self.settings.data.get("route_prefix", "")
+
     def cloud_http(self):
         options = {"timeout": httpx.Timeout(20, read=None), "follow_redirects": False}
         if self.settings.data.get("proxy"):
@@ -161,6 +165,8 @@ class Agent:
                 if self.role == "host":
                     services = self.vault.read().get("services", {})
                     self.vault.update(services={new_id("srv"): definition for definition in services.values()})
+                    self.settings.data.pop("pending_deletions", None)
+                    self.settings.save()
                 else:
                     self.vault.update(mappings={})
                     self.settings.data["subscribe_all"] = True
@@ -310,6 +316,14 @@ class Agent:
                 await self.frp.stop()
             if not self.settings.data.get("disable_frp", False):
                 await self.frp.start()
+            for sid in list(self.settings.data.get("pending_deletions", [])):
+                try:
+                    await self.api("DELETE", "/api/hosts/me/servers/" + sid)
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code != 404:
+                        raise
+                self.settings.data["pending_deletions"].remove(sid)
+                self.settings.save()
             for sid, service in self.vault.read().get("services", {}).items():
                 exported = {
                     k: service[k] for k in ("name", "description", "transport", "enabled") if k in service
@@ -327,10 +341,13 @@ class Agent:
             for target, mode in self.settings.data.get("auto_exports", {}).items():
                 ids = self.active_mapping_ids()
                 mappings = self.vault.read().get("mappings", {})
-                preview = export_preview(
-                    target, ids, self.settings.home, mappings, self.port, mode,
-                    {item["id"]: item["name"] for item in self.catalog},
-                )
+                if self.settings.data.get("auto_export_all", {}).get(target) and hasattr(self, "connection_registry"):
+                    preview = self.connection_registry.export_all(target, mode)
+                else:
+                    preview = export_preview(
+                        target, ids, self.settings.home, mappings, self.port, mode,
+                        {item["id"]: item["name"] for item in self.catalog}, self.route_prefix,
+                    )
                 if preview["diff"]:
                     write_export(preview)
         self.status = "已连接"
@@ -390,6 +407,16 @@ class Agent:
             await actor.close()
 
 
+def validate_enrollment(body: dict, settings: Settings):
+    url, code, name = (body.get(key, "") for key in ("cloud_url", "code", "name"))
+    if not all(isinstance(value, str) for value in (url, code, name)):
+        raise ValueError("云端地址、接入码和设备名称必须是文本")
+    url, code, name = url.strip(), code.strip(), name.strip()
+    if not name or len(name) > 128 or not code or len(code) > 512:
+        raise ValueError("请填写设备名称和一次性接入码；设备名称最多 128 个字符")
+    return url, code, name, bool(body.get("allow_insecure_http", settings.data.get("allow_insecure_http", False)))
+
+
 def validate_service(body: dict) -> dict:
     transport = body.get("transport")
     name = str(body.get("name", "")).strip()
@@ -437,23 +464,30 @@ def validate_service(body: dict) -> dict:
     return result
 
 
-def create_agent_app(agent: Agent, background=True) -> FastAPI:
+def create_agent_app(agent: Agent, background=True, session_store=None, connections=None) -> FastAPI:
+    if session_store is None:
+        from .connections import Connections
+
+        connections = connections or Connections(agent)
+
     @asynccontextmanager
     async def lifespan(app):
         if background:
-            agent.task = asyncio.create_task(agent.run())
+            await connections.start()
         yield
-        await agent.close()
+        if connections:
+            await connections.close()
 
     app = FastAPI(title="MCP Transfer " + agent.role, lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.agent = agent
+    app.state.connections = connections
     origins = {f"http://127.0.0.1:{agent.port}", f"http://localhost:{agent.port}"}
     app.add_middleware(
         BoundaryMiddleware, origins=origins, hosts={f"127.0.0.1:{agent.port}", f"localhost:{agent.port}"}
     )
     web = Path(__file__).parent / "web"
     app.mount("/static", StaticFiles(directory=web, check_dir=False), name="static")
-    sessions = {}
+    sessions = session_store if session_store is not None else {}
     cookie_name = f"mcpt_{agent.role}_{agent.port}"
     previews = {}
     rate = RateLimiter()
@@ -465,6 +499,36 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             raise HTTPException(401, "Enter this agent's local access password")
         require_csrf(request, login[0])
         return login[0]
+
+    if connections:
+        from .connections import ConnectionRouter
+
+        @app.get("/api/connections")
+        async def list_connections(request: Request):
+            local_user(request)
+            return connections.summary()
+
+        @app.post("/api/connections")
+        async def add_connection(request: Request):
+            local_user(request)
+            try:
+                return await connections.add(await request.json())
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from error
+            except httpx.HTTPStatusError as error:
+                raise HTTPException(400, "云端拒绝登记，请检查接入码是否有效及角色是否匹配") from error
+            except httpx.HTTPError as error:
+                raise HTTPException(503, "无法连接新云端，原有连接已保留") from error
+
+        @app.delete("/api/connections/{cid}")
+        async def remove_connection(cid: str, request: Request):
+            local_user(request)
+            try:
+                return await connections.remove(cid)
+            except ValueError as error:
+                raise HTTPException(400, str(error)) from error
+
+        app.mount("/connections/{connection_id}", ConnectionRouter(connections, sessions))
 
     @app.get("/")
     async def index():
@@ -526,6 +590,8 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             "last_sync": agent.synced_at,
             "paths": application_paths(),
             "auto_exports": agent.settings.data.get("auto_exports", {}),
+            "proxy": agent.settings.data.get("proxy", ""),
+            "enterprise_ca": agent.settings.data.get("enterprise_ca", ""),
         }
 
     @app.post("/api/configure")
@@ -533,21 +599,20 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         local_user(request)
         body = await request.json()
         try:
-            if str(body.get("code", "")).count(".") == 2:
-                return await agent.reconnect(
-                    body.get("cloud_url", ""), body.get("code", ""), body.get("name", "Device"),
-                    bool(body.get("allow_insecure_http", agent.settings.data.get("allow_insecure_http", False))),
-                )
+            url, code, name, allow_http = validate_enrollment(body, agent.settings)
             await agent.enroll(
-                body.get("cloud_url", ""),
-                body.get("code", ""),
-                body.get("name", "Device"),
-                bool(agent.settings.data.get("development")),
-                bool(body.get("allow_insecure_http", agent.settings.data.get("allow_insecure_http", False))),
+                url, code, name, bool(agent.settings.data.get("development")), allow_http,
             )
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        except httpx.HTTPStatusError as error:
+            raise HTTPException(400, "登记被云端拒绝，请检查接入码和设备角色") from error
+        except httpx.HTTPError as error:
+            raise HTTPException(503, "无法连接云端，登记尚未完成，请检查地址和网络") from error
+        try:
             await agent.tick()
-        except (ValueError, httpx.HTTPError) as error:
-            raise HTTPException(400, str(error)[:300]) from error
+        except Exception:
+            return {"ok": True, "synced": False, "message": "登记已保存；暂未同步成功，请检查网络后点击立即同步，无需重复输入接入码。"}
         return {"ok": True}
 
     @app.put("/api/connection")
@@ -572,10 +637,8 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         local_user(request)
         body = await request.json()
         try:
-            return await agent.reconnect(
-                body.get("cloud_url", ""), body.get("code", ""), body.get("name", "Device"),
-                bool(body.get("allow_insecure_http", agent.settings.data.get("allow_insecure_http", False))),
-            )
+            url, code, name, allow_http = validate_enrollment(body, agent.settings)
+            return await agent.reconnect(url, code, name, allow_http)
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
         except httpx.HTTPStatusError as error:
@@ -597,6 +660,27 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         if ca and not Path(ca).is_file():
             raise HTTPException(400, "CA file does not exist")
         agent.settings.data.update(proxy=proxy, enterprise_ca=ca)
+        agent.settings.save()
+        return {"ok": True}
+
+    @app.get("/api/settings/limits")
+    async def host_limits(request: Request):
+        local_user(request)
+        if agent.role != "host":
+            raise HTTPException(403, "请在主机或云端管理并发限制")
+        return {"adapter_processes": agent.settings.data.get("max_adapter_processes", 64),
+                "sessions_per_adapter": agent.settings.data.get("max_adapter_sessions", 8)}
+
+    @app.put("/api/settings/limits")
+    async def update_host_limits(request: Request):
+        local_user(request)
+        if agent.role != "host":
+            raise HTTPException(403, "Host role required")
+        body = await request.json()
+        for key in ("adapter_processes", "sessions_per_adapter"):
+            if type(body.get(key)) is not int or not 0 <= body[key] <= 4096:
+                raise HTTPException(400, "上限必须是 0–4096 的整数，0 表示不限制")
+        agent.settings.data.update(max_adapter_processes=body["adapter_processes"], max_adapter_sessions=body["sessions_per_adapter"])
         agent.settings.save()
         return {"ok": True}
 
@@ -626,7 +710,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             {
                 **item,
                 "mapped": item["id"] in mappings and mappings[item["id"]].get("enabled", True),
-                "local_url": f"http://127.0.0.1:{agent.port}/mcp/{item['id']}",
+                "local_url": f"http://127.0.0.1:{agent.port}{agent.route_prefix}/mcp/{item['id']}",
             }
             for item in agent.catalog
         ]
@@ -695,6 +779,28 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
                 agent.actors.pop(key, None)
         return {"ok": True}
 
+    @app.delete("/api/servers/{sid}")
+    async def delete_server(sid: str, request: Request):
+        local_user(request)
+        if agent.role != "host":
+            raise HTTPException(403, "Host role required")
+        services = agent.vault.read().get("services", {})
+        if sid not in services:
+            raise HTTPException(404, "Service not found")
+        # Queue cloud removal before changing local state. Offline deletion is
+        # fail-closed and retried by the next successful heartbeat.
+        queued = agent.settings.data.setdefault("pending_deletions", [])
+        if sid not in queued:
+            queued.append(sid)
+            agent.settings.save()
+        del services[sid]
+        agent.vault.update(services=services)
+        for key, actor in list(agent.actors.items()):
+            if key[0] == sid:
+                await actor.close()
+                agent.actors.pop(key, None)
+        return {"ok": True, "message": "本机服务已删除，云端服务和授权将在下次同步时清理"}
+
     @app.post("/api/servers/{sid}/toggle")
     async def toggle(sid: str, request: Request):
         local_user(request)
@@ -721,7 +827,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
                 raise HTTPException(400, "请先启用此服务的本地映射")
             if sid not in {item["id"] for item in agent.catalog}:
                 raise HTTPException(403, "此服务不在已授权目录中，请先同步")
-            context = mapped_client(agent.port, sid, mapping["token"])
+            context = mapped_client(agent.port, sid, mapping["token"], agent.route_prefix)
         try:
             async with asyncio.timeout(30), context as client:
                 result = await inspect_tools(client)
@@ -761,14 +867,17 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         ids = agent.active_mapping_ids()
         mappings = agent.vault.read().get("mappings", {})
         try:
-            result = export_preview(
-                target, ids, agent.settings.home, mappings, agent.port, mode,
-                {item["id"]: item["name"] for item in agent.catalog},
-            )
+            if body.get("scope") == "all" and connections:
+                result = connections.export_all(target, mode)
+            else:
+                result = export_preview(
+                    target, ids, agent.settings.home, mappings, agent.port, mode,
+                    {item["id"]: item["name"] for item in agent.catalog}, agent.route_prefix,
+                )
         except (ValueError, OSError) as error:
             raise HTTPException(400, str(error)) from error
         key = secrets.token_urlsafe(24)
-        previews[key] = {**result, "target": target, "mode": mode, "expires": time.time() + 300}
+        previews[key] = {**result, "target": target, "mode": mode, "scope": body.get("scope"), "expires": time.time() + 300}
         return {**{k: result[k] for k in ("path", "content", "diff")}, "preview_id": key}
 
     @app.post("/api/exports/apply")
@@ -785,6 +894,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         if body.get("auto_sync"):
             targets = agent.settings.data.setdefault("auto_exports", {})
             targets[preview["target"]] = preview["mode"]
+            agent.settings.data.setdefault("auto_export_all", {})[preview["target"]] = preview.get("scope") == "all"
             agent.settings.save()
         return result
 
@@ -910,9 +1020,10 @@ class HostAdapter:
                 return
             key = (sid, ticket["uid"], ticket["sub"], ticket.get("connection", "default"))
             if key not in agent.actors:
-                if len(agent.actors) >= 64:
-                    raise HTTPException(429, "Host process quota reached")
-                agent.actors[key] = Actor(definition, sid)
+                limit = agent.settings.data.get("max_adapter_processes", 64)
+                if limit and len(agent.actors) >= limit:
+                    raise HTTPException(429, f"主机 MCP 适配实例达到上限 {limit}，请在主机设置中调整", headers={"Retry-After": "1"})
+                agent.actors[key] = Actor(definition, sid, agent.settings.data.get("max_adapter_sessions", 8))
             actor = agent.actors[key]
             application = await actor.get_app()
             consumed = False

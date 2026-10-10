@@ -2,7 +2,8 @@ param(
     [Parameter(Mandatory=$true)][ValidateSet('host','client')][string]$Role,
     [int]$Port = 0,
     [switch]$AllowInsecureHttp,
-    [switch]$PrepareOnly
+    [switch]$PrepareOnly,
+    [switch]$Clean
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -24,6 +25,11 @@ try {
     }
     Write-Host "Source ready: $SourceRoot"
     if ($PrepareOnly) { return }
+    if ($Clean) {
+        $Cleanup = @{Role=$Role; Purge=$true}
+        if ($Role -eq 'client') { $Cleanup.RemoveExports = $true }
+        & (Join-Path $SourceRoot 'scripts\uninstall-windows.ps1') @Cleanup
+    }
     $Options = @{ Role = $Role; Port = $Port }
     if ($AllowInsecureHttp) { $Options.AllowInsecureHttp = $true }
     & (Join-Path $SourceRoot 'scripts\install-windows.ps1') @Options

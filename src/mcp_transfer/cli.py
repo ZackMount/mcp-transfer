@@ -70,7 +70,7 @@ def initialize_cloud(
     return generated
 
 
-async def run_cloud(settings: Settings, no_frp=False):
+async def run_cloud(settings: Settings, no_frp=False, bind_host="127.0.0.1", port=17800):
     from .frp import FrpProcess, write_frps
 
     if settings.data.get("role") != "cloud":
@@ -79,14 +79,19 @@ async def run_cloud(settings: Settings, no_frp=False):
         raise ValueError(
             "Configured origin differs from saved identity; run cloud-init --migrate-origin first"
         )
+    if bind_host not in {"127.0.0.1", "localhost", "::1"}:
+        if not settings.cloud_url.startswith("http://") or not settings.data.get("allow_insecure_http"):
+            raise ValueError("A public listener requires an explicitly configured HTTP deployment")
+    if not 1 <= port <= 65535:
+        raise ValueError("Cloud listener port must be between 1 and 65535")
     write_frps(settings)
     main = uvicorn.Server(
         uvicorn.Config(
             create_cloud(settings),
-            host="127.0.0.1",
-            port=17800,
+            host=bind_host,
+            port=port,
             access_log=False,
-            proxy_headers=True,
+            proxy_headers=bind_host in {"127.0.0.1", "localhost", "::1"},
             forwarded_allow_ips="127.0.0.1",
         )
     )
@@ -143,40 +148,48 @@ async def run_agent(settings: Settings, role: str, no_frp=False):
         listener.close()
         raise ValueError("The local WebUI port is occupied. Stop the old agent or choose another port.") from None
     agent = Agent(settings, role)
+    from .connections import Connections
+
+    connections = Connections(agent)
     web = uvicorn.Server(
         uvicorn.Config(
-            create_agent_app(agent), host="127.0.0.1", port=agent.port, access_log=False, proxy_headers=False
+            create_agent_app(agent, connections=connections), host="127.0.0.1", port=agent.port, access_log=False, proxy_headers=False
         )
     )
-    adapter_server = None
-    adapter_task = None
+    adapters = {}
 
     async def supervise_adapter():
-        nonlocal adapter_server, adapter_task
-        revision = None
         while not web.should_exit:
-            cert = settings.home / "device.crt"
-            current = cert.stat().st_mtime_ns if cert.exists() else None
-            if role == "host" and current and current != revision:
-                if adapter_server:
-                    adapter_server.should_exit = True
-                    await adapter_task
-                adapter_server = uvicorn.Server(
+            for cid in list(adapters):
+                if cid not in connections.agents:
+                    server, task, _ = adapters.pop(cid)
+                    server.should_exit = True
+                    await task
+            for cid, current_agent in list(connections.agents.items()):
+                profile = current_agent.settings
+                cert = profile.home / "device.crt"
+                current = cert.stat().st_mtime_ns if cert.exists() else None
+                previous = adapters.get(cid)
+                if role != "host" or not current or (previous and current == previous[2]):
+                    continue
+                if previous:
+                    previous[0].should_exit = True
+                    await previous[1]
+                server = uvicorn.Server(
                     uvicorn.Config(
-                        HostAdapter(agent),
+                        HostAdapter(current_agent),
                         host="127.0.0.1",
-                        port=int(settings.data.get("adapter_port", 17910)),
+                        port=int(profile.data.get("adapter_port", 17910)),
                         lifespan="off",
                         access_log=False,
                         proxy_headers=False,
-                        ssl_keyfile=str(settings.home / "device.key"),
+                        ssl_keyfile=str(profile.home / "device.key"),
                         ssl_certfile=str(cert),
-                        ssl_ca_certs=str(settings.home / "ca.crt"),
+                        ssl_ca_certs=str(profile.home / "ca.crt"),
                         ssl_cert_reqs=ssl.CERT_REQUIRED,
                     )
                 )
-                adapter_task = asyncio.create_task(adapter_server.serve())
-                revision = current
+                adapters[cid] = server, asyncio.create_task(server.serve()), current
             await asyncio.sleep(2)
 
     monitor = asyncio.create_task(supervise_adapter())
@@ -190,9 +203,9 @@ async def run_agent(settings: Settings, role: str, no_frp=False):
     finally:
         monitor.cancel()
         await asyncio.gather(monitor, return_exceptions=True)
-        if adapter_server:
-            adapter_server.should_exit = True
-            await adapter_task
+        for server, _, _ in adapters.values():
+            server.should_exit = True
+        await asyncio.gather(*(task for _, task, _ in adapters.values()), return_exceptions=True)
         listener.close()
 
 
@@ -201,7 +214,7 @@ async def bridge(settings: Settings, sid: str):
     if not mapping or not mapping.get("enabled", True):
         raise ValueError("Server is not mapped. Enable it in the Client WebUI first.")
     port = int(settings.data.get("ui_port", 17820))
-    async with mapped_client(port, sid, mapping["token"]) as client:
+    async with mapped_client(port, sid, mapping["token"], settings.data.get("route_prefix", "")) as client:
         upstream_name = client.server_info.name if client.server_info else sid
         server = proxy_server(client, upstream_name)
         async with stdio_server() as (read, write):
@@ -221,6 +234,8 @@ def main():
     init.add_argument("--migrate-origin", action="store_true")
     cloud = sub.add_parser("cloud")
     cloud.add_argument("--no-frp", action="store_true")
+    cloud.add_argument("--bind-host", default="127.0.0.1")
+    cloud.add_argument("--port", type=int, default=17800)
     for role in ("host", "client"):
         cmd = sub.add_parser(role)
         cmd.add_argument("--port", type=int)
@@ -231,6 +246,7 @@ def main():
     connect.add_argument("--server", required=True)
     install = sub.add_parser("install-frp")
     install.add_argument("--binary", choices=["frpc", "frps"], required=True)
+    sub.add_parser("clean-exports")
     sub.add_parser("local-password")
     sub.add_parser("doctor")
     sub.add_parser("demo-server")
@@ -254,7 +270,8 @@ def main():
                 print("Administrator: " + args.username)
                 print("Initial password (save securely): " + password)
         elif args.command == "cloud":
-            asyncio.run(run_cloud(settings, args.no_frp))
+            with profile_lock(settings.home):
+                asyncio.run(run_cloud(settings, args.no_frp, args.bind_host, args.port))
         elif args.command in {"host", "client"}:
             with profile_lock(settings.home):
                 if settings.data.get("role") not in {None, args.command}:
@@ -279,6 +296,10 @@ def main():
             from .frp import download_frp
 
             print(asyncio.run(download_frp(settings.home, args.binary)))
+        elif args.command == "clean-exports":
+            from .exporters import clean_exports
+
+            print(json.dumps(clean_exports(settings.home), ensure_ascii=False, indent=2))
         elif args.command == "doctor":
             print(
                 json.dumps(

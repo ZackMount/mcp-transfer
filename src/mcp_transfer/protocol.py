@@ -28,13 +28,13 @@ class WireResult(types.Result):
 
 
 @asynccontextmanager
-async def mapped_client(port: int, sid: str, token: str):
+async def mapped_client(port: int, sid: str, token: str, route_prefix: str = ""):
     """Use the same authenticated loopback transport for diagnostics and stdio bridges."""
     headers = {"Authorization": "Bearer " + token, "X-MCPT-Connection": uuid.uuid4().hex}
     async with httpx2.AsyncClient(
         headers=headers, trust_env=False, follow_redirects=False, timeout=httpx2.Timeout(30, read=None)
     ) as http:
-        transport = streamable_http_client(f"http://127.0.0.1:{port}/mcp/{sid}", http_client=http)
+        transport = streamable_http_client(f"http://127.0.0.1:{port}{route_prefix}/mcp/{sid}", http_client=http)
         async with Client(transport, cache=None) as client:
             yield client
 
@@ -149,9 +149,10 @@ def proxy_server(client: Client, name: str) -> Server:
 
 
 class Actor:
-    def __init__(self, config: dict, sid: str):
+    def __init__(self, config: dict, sid: str, max_sessions=8):
         self.config = config
         self.sid = sid
+        self.max_sessions = max_sessions or None
         self.ready = asyncio.Event()
         self.stop = asyncio.Event()
         self.error = None
@@ -165,7 +166,7 @@ class Actor:
             async with upstream_client(self.config) as client:
                 server = proxy_server(client, self.config.get("name", self.sid))
                 self.app = server.streamable_http_app(
-                    streamable_http_path=f"/mcp/{self.sid}", max_sessions=8, session_idle_timeout=300
+                    streamable_http_path=f"/mcp/{self.sid}", max_sessions=self.max_sessions, session_idle_timeout=300
                 )
                 async with self.app.router.lifespan_context(self.app):
                     self.ready.set()

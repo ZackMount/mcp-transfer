@@ -20,3 +20,9 @@ coverage.xml
 .coverage
 test-results/
 release/
+.native.env
+.deployment-mode
+.native-user-created
+.tools/
+.cache/
+runtime/

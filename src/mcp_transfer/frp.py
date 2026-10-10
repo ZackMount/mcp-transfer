@@ -6,6 +6,7 @@ import io
 import json
 import os
 import platform
+import subprocess
 import tarfile
 import uuid
 import zipfile
@@ -143,6 +144,7 @@ class FrpProcess:
             str(self.settings.home / f"{self.binary}.toml"),
             stdout=self.log,
             stderr=self.log,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
         )
         if os.name == "nt":
             import win32api

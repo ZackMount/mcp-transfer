@@ -11,7 +11,7 @@ from pathlib import Path
 
 import tomlkit
 
-from .config import atomic_write
+from .config import Settings, atomic_write
 
 TARGETS = {"generic", "cursor", "vscode", "claude", "codex"}
 
@@ -41,6 +41,7 @@ def generate(
     mode: str = "stdio",
     existing: str = "",
     server_names: dict[str, str] | None = None,
+    route_prefix: str = "",
 ) -> str:
     if target not in TARGETS or mode not in {"stdio", "http"}:
         raise ValueError("Unknown export format or mode")
@@ -59,9 +60,23 @@ def generate(
         if not isinstance(document, dict):
             raise ValueError("Configuration root must be an object")
         group = document.setdefault("servers" if target == "vscode" else "mcpServers", {})
+    if not hasattr(group, "items"):
+        raise ValueError("MCP server configuration must be an object")
     def export_name(sid):
         label = re.sub(r"[^a-zA-Z0-9_-]+", "-", (server_names or {}).get(sid, ""))[:48].strip("-_")
-        return f"mcpt_{label}_{sid}" if label else "mcpt_" + sid
+        connection = route_prefix.rsplit("/", 1)[-1] if route_prefix else ""
+        return "mcpt_" + "_".join(part for part in (label, connection, sid) if part)
+
+    def owned_bridge(item):
+        if not hasattr(item, "get"):
+            return False
+        args = item.get("args", [])
+        if not isinstance(args, list) or args[:2] != ["-m", "mcp_transfer"] or "connect" not in args:
+            return False
+        try:
+            return Path(args[args.index("--home") + 1]) == home
+        except (ValueError, IndexError, TypeError):
+            return False
 
     desired_names = {export_name(sid) for sid in server_ids}
     # Only remove entries that actually launch our bridge, never arbitrary similarly named entries.
@@ -69,14 +84,12 @@ def generate(
         item = group[key]
         ours = (
             key.startswith("mcpt_")
-            and hasattr(item, "get")
-            and item.get("args", [])[:2] == ["-m", "mcp_transfer"]
-            and "connect" in item.get("args", [])
+            and owned_bridge(item)
         )
         if key.startswith("mcpt_") and hasattr(item, "get"):
             url = item.get("url", "")
             match = re.fullmatch(
-                rf"http://127\.0\.0\.1:{port}/mcp/(srv_[a-zA-Z0-9_-]+)", url
+                rf"http://127\.0\.0\.1:{port}{re.escape(route_prefix)}/mcp/(srv_[a-zA-Z0-9_-]+)", url
             ) if isinstance(url, str) else None
             ours = ours or bool(match and key.endswith("_" + match.group(1)))
         if ours and key not in desired_names:
@@ -94,7 +107,7 @@ def generate(
             if target == "vscode":
                 entry["type"] = "stdio"
         else:
-            entry = {"url": f"http://127.0.0.1:{port}/mcp/{sid}"}
+            entry = {"url": f"http://127.0.0.1:{port}{route_prefix}/mcp/{sid}"}
             entry["http_headers" if target == "codex" else "headers"] = {
                 "Authorization": "Bearer " + mappings[sid]["token"]
             }
@@ -102,10 +115,9 @@ def generate(
                 entry["type"] = "http"
         if name in group:
             current = group[name]
-            args = current.get("args", []) if hasattr(current, "get") else []
-            ours = args[:2] == ["-m", "mcp_transfer"] and "connect" in args
+            ours = owned_bridge(current)
             local_url = current.get("url", "") if hasattr(current, "get") else ""
-            ours = ours or local_url == f"http://127.0.0.1:{port}/mcp/{sid}"
+            ours = ours or local_url == f"http://127.0.0.1:{port}{route_prefix}/mcp/{sid}"
             if not ours:
                 raise ValueError(f"Existing entry {name} is not owned by this platform")
         group[name] = entry
@@ -119,10 +131,11 @@ def generate(
 def export_preview(
     target: str, server_ids: list[str], home: Path, mappings: dict, port: int, mode: str,
     server_names: dict[str, str] | None = None,
+    route_prefix: str = "",
 ):
     path = Path(application_paths()[target])
     existing = path.read_text(encoding="utf-8-sig") if path.exists() else ""
-    content = generate(target, server_ids, home, mappings, port, mode, existing, server_names)
+    content = generate(target, server_ids, home, mappings, port, mode, existing, server_names, route_prefix)
     diff = "".join(
         difflib.unified_diff(
             existing.splitlines(True), content.splitlines(True), fromfile=str(path), tofile=str(path)
@@ -143,3 +156,50 @@ def write_export(preview: dict):
         os.chmod(backup, 0o600)
     atomic_write(path, preview["content"])
     return {"path": str(path), "backup": backup}
+
+
+def clean_exports(profile_root: Path):
+    """Remove only this installation's entries, preserving all other settings."""
+    root = profile_root.resolve()
+    profiles = [Settings(root)]
+    profiles.extend(Settings(path.parent) for path in (root / "connections").glob("conn_*/settings.json"))
+    profiles.extend(Settings(path.parent) for path in (root / "removed-connections").glob("conn_*/settings.json"))
+    urls = {(int(profile.data.get("ui_port", 17820)), profile.data.get("route_prefix", "")) for profile in profiles}
+    results = []
+    for target, filename in application_paths().items():
+        path = Path(filename)
+        if not path.exists():
+            continue
+        try:
+            existing = path.read_text(encoding="utf-8-sig")
+            document = tomlkit.parse(existing) if target == "codex" else json.loads(existing)
+            group = document.get("mcp_servers" if target == "codex" else "servers" if target == "vscode" else "mcpServers", {})
+            if not hasattr(group, "items"):
+                raise ValueError("MCP entries are not an object")
+            removed = 0
+            for key, item in list(group.items()):
+                if not key.startswith("mcpt_") or not hasattr(item, "get"):
+                    continue
+                args = item.get("args", [])
+                owned = False
+                if isinstance(args, list) and args[:2] == ["-m", "mcp_transfer"] and "connect" in args:
+                    try:
+                        home = Path(args[args.index("--home") + 1]).resolve()
+                        owned = home == root or home.is_relative_to(root / "connections") or home.is_relative_to(root / "removed-connections")
+                    except (ValueError, TypeError, IndexError):
+                        pass
+                url = item.get("url", "")
+                if isinstance(url, str):
+                    for port, prefix in urls:
+                        match = re.fullmatch(rf"http://127\.0\.0\.1:{port}{re.escape(prefix)}/mcp/(srv_[a-zA-Z0-9_-]+)", url)
+                        owned = owned or bool(match and key.endswith("_" + match.group(1)))
+                if owned:
+                    del group[key]
+                    removed += 1
+            if removed:
+                content = tomlkit.dumps(document) if target == "codex" else json.dumps(document, ensure_ascii=False, indent=2) + "\n"
+                written = write_export({"path": filename, "before": existing, "content": content})
+                results.append({"target": target, "removed": removed, **written})
+        except (ValueError, OSError) as error:
+            raise ValueError(f"Cannot safely clean {filename}: {error}. Original retained; merge manually before purging.") from error
+    return results

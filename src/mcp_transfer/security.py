@@ -135,6 +135,16 @@ class BoundaryMiddleware(BaseHTTPMiddleware):
         origin = request.headers.get("origin")
         if origin is not None and origin not in self.origins:
             return JSONResponse({"detail": "Invalid Origin"}, status_code=403)
+        if "/api/" in request.url.path and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            try:
+                body = await limited_body(request, 1024 * 1024)
+                request._body = body
+                if body and not isinstance(json.loads(body), dict):
+                    return JSONResponse({"detail": "请求内容必须是 JSON 对象"}, status_code=400)
+            except (ValueError, UnicodeDecodeError):
+                return JSONResponse({"detail": "请求内容不是有效的 JSON"}, status_code=400)
+            except HTTPException as error:
+                return JSONResponse({"detail": error.detail}, status_code=error.status_code)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"

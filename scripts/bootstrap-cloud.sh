@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Public download bootstrap. No GitHub account or Git is needed for a new install.
 set -euo pipefail
-INSTALL_DIR=""; PREPARE_ONLY=0; INSTALL_ARGS=(); DOWNLOAD_PROXY=""
+INSTALL_DIR=""; PREPARE_ONLY=0; INSTALL_ARGS=(); DOWNLOAD_PROXY=""; NATIVE=0; CLEAN=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --install-dir) INSTALL_DIR="${2:?--install-dir needs a directory}"; shift 2 ;;
     --prepare-only) PREPARE_ONLY=1; shift ;;
+    --native) NATIVE=1; shift ;;
+    --clean) CLEAN=1; shift ;;
     --download-proxy) DOWNLOAD_PROXY="${2:?--download-proxy needs a URL}"; INSTALL_ARGS+=("--download-proxy" "$DOWNLOAD_PROXY"); shift 2 ;;
     *) INSTALL_ARGS+=("$1"); shift ;;
   esac
@@ -86,4 +88,12 @@ else
 fi
 printf 'Source ready: %s\n' "$INSTALL_DIR"
 if [[ "$PREPARE_ONLY" == 1 ]]; then exit 0; fi
-bash "$INSTALL_DIR/scripts/install-cloud.sh" "${INSTALL_ARGS[@]}"
+if [[ "$CLEAN" == 1 ]]; then
+  # Retain the freshly downloaded source while deleting only deployment data.
+  bash "$INSTALL_DIR/scripts/uninstall-cloud.sh" --install-dir "$INSTALL_DIR" --purge --keep-source --yes
+fi
+if [[ "$NATIVE" == 1 ]]; then
+  bash "$INSTALL_DIR/scripts/install-cloud-native.sh" "${INSTALL_ARGS[@]}"
+else
+  bash "$INSTALL_DIR/scripts/install-cloud.sh" "${INSTALL_ARGS[@]}"
+fi

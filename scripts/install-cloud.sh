@@ -30,7 +30,7 @@ fi
 if [[ ! "$PIP_INDEX_URL" =~ ^https://[a-zA-Z0-9][a-zA-Z0-9.-]*(:[0-9]{1,5})?/[a-zA-Z0-9/_~.-]+/?$ ]]; then
   printf 'Package index must be an HTTPS URL without credentials or query parameters.\n' >&2; exit 2
 fi
-read_env() { if [[ -f .env ]]; then sed -n "s/^$1=//p" .env | tail -1; fi; }
+read_env() { local config="${MCPT_INSTALL_ENV:-.env}"; if [[ -f "$config" ]]; then sed -n "s/^$1=//p" "$config" | tail -1; fi; }
 OLD_URL="$(read_env MCPT_PUBLIC_URL)"
 OLD_DOMAIN="$(read_env MCPT_DOMAIN)"
 if [[ -z "$OLD_URL" && -n "$OLD_DOMAIN" ]]; then OLD_URL="https://$OLD_DOMAIN"; fi
@@ -81,6 +81,9 @@ if [[ "$PRINT_CONFIG" == 1 ]]; then
   exit 0
 fi
 if [[ "$(uname -s)" != Linux || $EUID -ne 0 ]]; then printf 'Run this installer on Linux with sudo.\n' >&2; exit 1; fi
+if [[ -f .deployment-mode && "$(cat .deployment-mode)" == native ]]; then
+  printf 'This directory contains a native deployment. Upgrade with --native; changing modes requires a clean install.\n' >&2; exit 2
+fi
 . "$ROOT_DIR/scripts/ensure-docker.sh"
 ensure_docker
 umask 077
@@ -139,3 +142,4 @@ fi
 printf 'Do not expose internal 17800, 17900, 15432 or 21000-21999.\n'
 if [[ "$ORIGIN_CHANGED" == 1 ]]; then printf 'Update BOTH host and client WebUI > Settings > Cloud address. Device identities and mappings remain valid.\n'; fi
 printf 'Save the initial administrator password shown on first initialization.\nLogs: docker compose logs -f --tail=100\n'
+printf 'docker\n' > .deployment-mode

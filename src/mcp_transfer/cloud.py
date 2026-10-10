@@ -64,7 +64,9 @@ def create_cloud(settings: Settings) -> FastAPI:
     pki.local_certificate("frps", [origin.hostname])
     rate = RateLimiter()
     sessions: dict[tuple[str, str], tuple[str, str, float]] = {}
-    inflight: dict[str, int] = {}
+    from .limits import DEFAULT_LIMITS, RequestLimits, validate_limits
+
+    limits = RequestLimits(settings)
     pending_mfa: dict[str, tuple[str, float]] = {}
 
     @asynccontextmanager
@@ -76,6 +78,7 @@ def create_cloud(settings: Settings) -> FastAPI:
     app.state.db = db
     app.state.signer = signer
     app.state.settings = settings
+    app.state.limits = limits
     app.add_middleware(BoundaryMiddleware, origins={public}, hosts={origin.netloc})
     web = Path(__file__).parent / "web"
     app.mount("/static", StaticFiles(directory=web, check_dir=False), name="static")
@@ -88,6 +91,23 @@ def create_cloud(settings: Settings) -> FastAPI:
 
     def client_ip(request: Request):
         return request.client.host if request.client else "unknown"
+
+    @app.get("/api/settings/limits")
+    async def get_limits(request: Request):
+        user_session(request, admin=True)
+        return {**DEFAULT_LIMITS, **settings.data.get("limits", {})}
+
+    @app.put("/api/settings/limits")
+    async def set_limits(request: Request):
+        user = user_session(request, admin=True)
+        try:
+            value = validate_limits(await request.json())
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        settings.data["limits"] = value
+        settings.save()
+        log(user.id, "concurrency_limits_updated")
+        return {"ok": True, **value}
 
     def user_session(request: Request, admin: bool = False) -> User:
         value = request.cookies.get("mcpt_session", "")
@@ -509,6 +529,14 @@ def create_cloud(settings: Settings) -> FastAPI:
         log(user.id, "device_revoked", did)
         return {"ok": True}
 
+    @app.post("/api/devices/me/disconnect")
+    async def disconnect_device(request: Request):
+        device = device_request(request)
+        with db.begin() as session:
+            session.get(Device, device.id).active = False
+        log(device.owner, "device_disconnected", device.id)
+        return {"ok": True}
+
     def remove_devices(session, ids):
         server_ids = list(session.scalars(select(Service.id).where(Service.host_id.in_(ids))))
         session.execute(delete(Grant).where(or_(Grant.device_id.in_(ids), Grant.server_id.in_(server_ids))))
@@ -583,6 +611,21 @@ def create_cloud(settings: Settings) -> FastAPI:
             service.capabilities = body.get("capabilities", {})
             service.revision += 1
         return {"id": sid, "revision": service.revision}
+
+    @app.delete("/api/hosts/me/servers/{sid}")
+    async def unpublish(sid: str, request: Request):
+        host = device_request(request, "host")
+        with db.begin() as session:
+            service = session.get(Service, sid)
+            if not service or service.host_id != host.id:
+                raise HTTPException(404, "Service not found")
+            session.execute(delete(Grant).where(Grant.server_id == sid))
+            session.delete(service)
+        for key in list(sessions):
+            if key[0] == sid:
+                sessions.pop(key, None)
+        log(host.owner, "service_unpublished", sid)
+        return {"ok": True}
 
     @app.get("/api/servers")
     async def server_list(request: Request):
@@ -896,9 +939,6 @@ def create_cloud(settings: Settings) -> FastAPI:
             sessions[(sid, session_id)] = (*binding, time.time() + 3600)
         if message and "method" not in message and not session_id:
             raise HTTPException(400, "An existing session is required for client responses")
-        if inflight.get(device.id, 0) >= 32:
-            raise HTTPException(429, "Device concurrent request limit reached")
-        inflight[device.id] = inflight.get(device.id, 0) + 1
         connection = request.headers.get("x-mcpt-connection", "default")
         if len(connection) > 64 or not connection.replace("-", "").isalnum():
             raise HTTPException(400, "Invalid connection identifier")
@@ -921,8 +961,11 @@ def create_cloud(settings: Settings) -> FastAPI:
             verify=context, trust_env=False, timeout=httpx.Timeout(30, read=None), follow_redirects=False
         )
 
+        release = None
+
         async def cleanup():
-            inflight[device.id] = max(0, inflight.get(device.id, 1) - 1)
+            if release:
+                release()
             await client.aclose()
 
         async def alive():
@@ -947,9 +990,12 @@ def create_cloud(settings: Settings) -> FastAPI:
                 headers=headers,
                 extensions={"sni_hostname": f"{host.id}.mcp.internal"},
             )
+            release = limits.acquire(device.id, request.method)
             response = await client.send(upstream_request, stream=True)
-        except (httpx.HTTPError, OSError):
+        except BaseException as error:
             await cleanup()
+            if not isinstance(error, (httpx.HTTPError, OSError)):
+                raise
             log(device.owner, message.get("method", request.method), sid, "upstream_unavailable")
             raise HTTPException(
                 503, "Host tunnel is unavailable; no tool call was automatically replayed"

@@ -33,6 +33,7 @@ jobs:
           cache: pip
       - run: python -m pip install -c requirements.lock ".[dev]"
       - run: ruff check src tests
+      - run: node --test tests/test_webui.js
       - run: pytest -q
       - name: Windows real frp and MCP subprocess integration
         if: runner.os == 'Windows'
@@ -76,3 +77,33 @@ jobs:
       - run: COMPOSE_BAKE=false docker compose --env-file deploy/ci.env build cloud
       - name: Anonymous Linux source download
         run: bash scripts/bootstrap-cloud.sh --prepare-only --install-dir "$RUNNER_TEMP/mcp-transfer-download"
+  native-deployment:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install native cloud on the physical runner
+        run: |
+          sudo mkdir /opt/mcp-transfer-native
+          sudo cp -a . /opt/mcp-transfer-native/
+          sudo bash /opt/mcp-transfer-native/scripts/install-cloud-native.sh --public-url http://127.0.0.1:18080 --frp-port 17000 --allow-insecure-http
+          curl --fail http://127.0.0.1:18080/healthz
+          sudo systemctl is-active mcp-transfer-cloud
+      - name: Upgrade preserves the database and cloud identity
+        run: |
+          before="$(sudo sha256sum /opt/mcp-transfer-native/data/cloud/pki/ca.key /opt/mcp-transfer-native/data/cloud/signing.key)"
+          sudo bash /opt/mcp-transfer-native/scripts/install-cloud-native.sh
+          test "$before" = "$(sudo sha256sum /opt/mcp-transfer-native/data/cloud/pki/ca.key /opt/mcp-transfer-native/data/cloud/signing.key)"
+          curl --fail http://127.0.0.1:18080/healthz
+      - name: Full cleanup removes only this deployment
+        run: |
+          sudo bash /opt/mcp-transfer-native/scripts/uninstall-cloud.sh --install-dir /opt/mcp-transfer-native --purge --yes --keep-source
+          test ! -d /opt/mcp-transfer-native/data
+          test ! -d /opt/mcp-transfer-native/runtime
+          test ! -f /etc/systemd/system/mcp-transfer-cloud.service
+          test -f /opt/mcp-transfer-native/pyproject.toml
+      - name: Failure diagnostics
+        if: failure()
+        run: sudo journalctl -u mcp-transfer-cloud -n 100 --no-pager
