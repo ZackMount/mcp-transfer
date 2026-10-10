@@ -18,6 +18,10 @@ if (-not (Test-Path $Python)) {
 }
 if (-not (Test-Path $Python)) { throw 'Python 3.12 was not found in its per-user installation directory.' }
 New-Item -ItemType Directory -Force -Path $InstallRoot, $DataRoot | Out-Null
+# Native programs cannot start from a stale/deleted PowerShell working directory.
+# Use the installation directory explicitly rather than the caller's location.
+Set-Location -LiteralPath $InstallRoot
+[System.Environment]::CurrentDirectory = $InstallRoot
 $Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 & icacls $InstallRoot /inheritance:r /grant:r "${Identity}:(OI)(CI)F" 'SYSTEM:(OI)(CI)F' /Q | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Cannot restrict installation directory permissions.' }
