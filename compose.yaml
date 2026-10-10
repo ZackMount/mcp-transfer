@@ -1,0 +1,57 @@
+name: mcp-transfer
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mcpt
+      POSTGRES_PASSWORD: ${MCPT_DB_PASSWORD:?Run scripts/install-cloud.sh first}
+      POSTGRES_DB: mcpt
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcpt -d mcpt"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  cloud:
+    build: .
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MCPT_PUBLIC_URL: https://${MCPT_DOMAIN:?Run scripts/install-cloud.sh first}
+      DATABASE_URL: postgresql+psycopg://mcpt:${MCPT_DB_PASSWORD}@127.0.0.1:15432/mcpt
+    volumes:
+      - ./data/cloud:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      MCPT_DOMAIN: ${MCPT_DOMAIN}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [cloud]
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-transfer"
+version = "0.1.0"
+description = "Self-hosted authenticated MCP sharing over private frp tunnels"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.143,<1", "uvicorn>=0.54,<1", "httpx>=0.28,<1", "mcp==2.3.0",
+  "sqlalchemy>=2.0,<3", "psycopg[binary]>=3.2,<4", "PyJWT[crypto]>=2.10,<3",
+  "argon2-cffi>=23,<26", "cryptography>=45", "tomlkit>=0.13,<1",
+  "keyring>=25,<26", "pyotp>=2.9,<3"
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.14,<1", "build>=1,<2"]
+
+[project.scripts]
+mcp-transfer = "mcp_transfer.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+mcp_transfer = ["web/*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501", "B008"]

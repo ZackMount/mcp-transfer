@@ -1,0 +1,11 @@
+{$MCPT_DOMAIN} {
+    encode zstd gzip
+    header Strict-Transport-Security "max-age=31536000"
+    reverse_proxy 127.0.0.1:17800 {
+        flush_interval -1
+        transport http {
+            dial_timeout 10s
+            response_header_timeout 60s
+        }
+    }
+}
