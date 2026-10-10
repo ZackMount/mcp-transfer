@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import platform
 import tarfile
 import zipfile
@@ -126,6 +127,7 @@ class FrpProcess:
         self.process = None
         self.log = None
         self.error = None
+        self._windows_job = None
 
     async def start(self):
         if self.process and self.process.returncode is None:
@@ -141,6 +143,30 @@ class FrpProcess:
             stdout=self.log,
             stderr=self.log,
         )
+        if os.name == "nt":
+            import win32api
+            import win32con
+            import win32job
+
+            if self._windows_job:
+                self._windows_job.Close()
+            job = win32job.CreateJobObject(None, None)
+            info = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
+            info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+            win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, info)
+            process_handle = win32api.OpenProcess(
+                win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, self.process.pid
+            )
+            try:
+                win32job.AssignProcessToJobObject(job, process_handle)
+                self._windows_job = job
+            except Exception:
+                job.Close()
+                self.process.kill()
+                await self.process.wait()
+                raise
+            finally:
+                process_handle.Close()
 
     async def stop(self):
         if self.process and self.process.returncode is None:
@@ -153,3 +179,6 @@ class FrpProcess:
         if self.log:
             self.log.close()
         self.process = None
+        if self._windows_job:
+            self._windows_job.Close()
+            self._windows_job = None
