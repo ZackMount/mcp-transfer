@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import tarfile
+import uuid
 import zipfile
 from pathlib import Path
 
@@ -150,7 +151,7 @@ class FrpProcess:
 
             if self._windows_job:
                 self._windows_job.Close()
-            job = win32job.CreateJobObject(None, None)
+            job = win32job.CreateJobObject(None, "MCPTransfer-" + uuid.uuid4().hex)
             info = win32job.QueryInformationJobObject(job, win32job.JobObjectExtendedLimitInformation)
             info["BasicLimitInformation"]["LimitFlags"] |= win32job.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
             win32job.SetInformationJobObject(job, win32job.JobObjectExtendedLimitInformation, info)
