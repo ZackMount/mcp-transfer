@@ -505,7 +505,7 @@ def create_agent_app(agent: Agent, background=True, session_store=None, connecti
     if session_store is None:
         from .connections import Connections
 
-        connections = connections or Connections(agent)
+        connections = connections or Connections(agent, lock_profiles=background)
 
     @asynccontextmanager
     async def lifespan(app):

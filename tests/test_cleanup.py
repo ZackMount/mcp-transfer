@@ -58,5 +58,6 @@ def test_cleaner_rejects_an_unrelated_directory_before_any_deletion(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="Linux shell validation")
 def test_shell_scripts_parse():
     scripts = Path(__file__).parents[1] / "scripts"
-    result = subprocess.run([shutil.which("bash"), "-n", *map(str, scripts.glob("*.sh"))], capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
+    for script in scripts.glob("*.sh"):
+        result = subprocess.run([shutil.which("bash"), "-n", str(script)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr

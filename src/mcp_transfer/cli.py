@@ -150,7 +150,7 @@ async def run_agent(settings: Settings, role: str, no_frp=False):
     agent = Agent(settings, role)
     from .connections import Connections
 
-    connections = Connections(agent)
+    connections = Connections(agent, lock_profiles=True)
     web = uvicorn.Server(
         uvicorn.Config(
             create_agent_app(agent, connections=connections), host="127.0.0.1", port=agent.port, access_log=False, proxy_headers=False

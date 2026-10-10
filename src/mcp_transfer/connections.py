@@ -13,6 +13,7 @@ from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 
 from .config import Settings, validate_cloud_url
+from .runtime_lock import profile_lock
 from .security import new_id
 from .vault import secure_windows_directory
 
@@ -23,21 +24,33 @@ def origin_key(url: str):
 
 
 class Connections:
-    def __init__(self, primary):
+    def __init__(self, primary, lock_profiles=False):
         self.primary = primary
         primary.connection_registry = self
         self.agents = {"primary": primary}
         self.lock = asyncio.Lock()
         self.running = False
-        for cid in primary.settings.data.get("connections", []):
-            if not isinstance(cid, str) or not re.fullmatch(r"conn_[a-f0-9]{24}", cid):
-                raise ValueError("Invalid saved cloud connection identifier")
-            self.agents[cid] = self.make_agent(cid)
+        self.profile_locks = {}
+        self.lock_profiles = lock_profiles
+        try:
+            for cid in primary.settings.data.get("connections", []):
+                if not isinstance(cid, str) or not re.fullmatch(r"conn_[a-f0-9]{24}", cid):
+                    raise ValueError("Invalid saved cloud connection identifier")
+                self.agents[cid] = self.make_agent(cid)
+        except Exception:
+            for lock in self.profile_locks.values():
+                lock.__exit__(None, None, None)
+            raise
 
     def make_agent(self, cid):
         from .agent import Agent
 
-        settings = Settings(self.primary.settings.home / "connections" / cid)
+        home = self.primary.settings.home / "connections" / cid
+        if self.lock_profiles:
+            lock = profile_lock(home)
+            lock.__enter__()
+            self.profile_locks[cid] = lock
+        settings = Settings(home)
         settings.data.update(
             role=self.primary.role, ui_port=self.primary.port, route_prefix="/connections/" + cid,
             disable_frp=self.primary.settings.data.get("disable_frp", False),
@@ -95,6 +108,9 @@ class Connections:
                 await agent.enroll(url, code, name, bool(agent.settings.data.get("development")), allow_http)
             except Exception:
                 await agent.close()
+                lock = self.profile_locks.pop(cid, None)
+                if lock:
+                    lock.__exit__(None, None, None)
                 shutil.rmtree(agent.settings.home)
                 raise
             self.agents[cid] = agent
@@ -104,6 +120,10 @@ class Connections:
             self.primary.settings.data["connections"] = [key for key in self.agents if key != "primary"]
             self.primary.settings.save()
             if self.running:
+                if cid not in self.profile_locks:
+                    lock = profile_lock(agent.settings.home)
+                    lock.__enter__()
+                    self.profile_locks[cid] = lock
                 agent.task = asyncio.create_task(agent.run())
             return {"ok": True, "id": cid, "message": "已添加独立云端连接，原有连接继续运行。请在新连接中配置服务或订阅目录。"}
 
@@ -124,6 +144,9 @@ class Connections:
                 if not isinstance(error, HTTPStatusError) or error.response.status_code not in {401, 403}:
                     raise ValueError("云端撤销失败，连接已保留。请升级云端至 v0.2.0 并检查网络，或先在云端删除此设备。") from error
             await agent.close()
+            lock = self.profile_locks.pop(cid, None)
+            if lock:
+                lock.__exit__(None, None, None)
             self.agents.pop(cid)
             self.primary.settings.data["connections"] = [key for key in self.agents if key != "primary"]
             self.primary.settings.save()
@@ -150,6 +173,19 @@ class Connections:
             return {"ok": True, "message": message, "configuration_warnings": warnings}
 
     async def start(self):
+        # Acquire all child profiles before any refresh tasks start. Exported
+        # stdio bridges only read these profiles and do not take the lock.
+        try:
+            for cid, agent in self.agents.items():
+                if cid != "primary" and cid not in self.profile_locks:
+                    lock = profile_lock(agent.settings.home)
+                    lock.__enter__()
+                    self.profile_locks[cid] = lock
+        except Exception:
+            for lock in self.profile_locks.values():
+                lock.__exit__(None, None, None)
+            self.profile_locks.clear()
+            raise
         self.running = True
         for agent in self.agents.values():
             agent.task = asyncio.create_task(agent.run())
@@ -178,7 +214,12 @@ class Connections:
 
     async def close(self):
         self.running = False
-        await asyncio.gather(*(agent.close() for agent in list(self.agents.values())))
+        try:
+            await asyncio.gather(*(agent.close() for agent in list(self.agents.values())))
+        finally:
+            for lock in self.profile_locks.values():
+                lock.__exit__(None, None, None)
+            self.profile_locks.clear()
 
 
 class ConnectionRouter:

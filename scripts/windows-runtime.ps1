@@ -10,7 +10,8 @@ function Stop-McpAgent {
     }
     # Match this user's exact profile and role, including old venv launcher children.
     $OwnSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $HomePattern = '--home\s+(?:"' + [regex]::Escape($DataRoot) + '"|' + [regex]::Escape($DataRoot) + ')\s+' + $Role + '(?:\s|$)'
+    $ProfilePattern = [regex]::Escape($DataRoot) + '(?:\\connections\\conn_[a-f0-9]{24})?'
+    $HomePattern = '--home\s+(?:"' + $ProfilePattern + '"|' + $ProfilePattern + ')\s+' + $Role + '(?:\s|$)'
     $ProcessFilter = "Name='python.exe' OR Name='pythonw.exe' OR Name='mcp-transfer.exe'"
     if ($Role -eq 'host') { $ProcessFilter += " OR Name='frpc.exe'" }
     foreach ($Process in Get-CimInstance Win32_Process -Filter $ProcessFilter) {
