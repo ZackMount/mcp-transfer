@@ -98,7 +98,7 @@ update_env MCPT_ALLOW_INSECURE_HTTP "$ALLOW_HTTP"
 mkdir -p data/cloud
 chown 10001:10001 data/cloud
 chmod 700 data/cloud
-MCPT_BUILD_PROXY="$DOWNLOAD_PROXY" MCPT_PIP_INDEX_URL="$PIP_INDEX_URL" docker compose build --pull cloud
+COMPOSE_BAKE=false MCPT_BUILD_PROXY="$DOWNLOAD_PROXY" MCPT_PIP_INDEX_URL="$PIP_INDEX_URL" docker compose build --pull cloud
 docker compose up -d --wait postgres
 if [[ "$ORIGIN_CHANGED" == 1 ]]; then docker compose stop cloud caddy; fi
 INIT_ARGS=(cloud-init --public-url "$PUBLIC_URL" --frp-port "$FRP_PORT")

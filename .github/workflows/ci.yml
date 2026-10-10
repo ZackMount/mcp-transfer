@@ -73,6 +73,6 @@ jobs:
           assert {port for server in servers for port in server['listen']} == {':18080'}
           assert not any(server.get('tls_connection_policies') for server in servers)
           PY
-      - run: docker compose --env-file deploy/ci.env build cloud
+      - run: COMPOSE_BAKE=false docker compose --env-file deploy/ci.env build cloud
       - name: Anonymous Linux source download
         run: bash scripts/bootstrap-cloud.sh --prepare-only --install-dir "$RUNNER_TEMP/mcp-transfer-download"
