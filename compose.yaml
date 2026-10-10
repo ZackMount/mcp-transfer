@@ -23,6 +23,8 @@ services:
     build:
       context: .
       network: host
+      entitlements:
+        - network.host
       args:
         HTTP_PROXY: ${MCPT_BUILD_PROXY:-}
         HTTPS_PROXY: ${MCPT_BUILD_PROXY:-}
