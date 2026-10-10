@@ -47,7 +47,7 @@ class Settings:
     def __init__(self, home: Path | None = None):
         self.home = home or default_home()
         self.path = self.home / "settings.json"
-        self.data = json.loads(self.path.read_text()) if self.path.exists() else {}
+        self.data = json.loads(self.path.read_text(encoding="utf-8-sig")) if self.path.exists() else {}
 
     def save(self):
         atomic_write(self.path, json.dumps(self.data, ensure_ascii=False, indent=2))

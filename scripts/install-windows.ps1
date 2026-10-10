@@ -67,6 +67,7 @@ if (-not $Ready) { throw "The agent did not become ready. Inspect Scheduled Task
 Write-Host "`n$Role installed. WebUI: http://127.0.0.1:$Port" -ForegroundColor Green
 Write-Host 'Local access password (save securely):'
 & $RuntimePython -m mcp_transfer --home $DataRoot local-password
+if ($LASTEXITCODE -ne 0) { throw 'The service is running, but local password retrieval failed. Inspect data\agent.log.' }
 $PasswordCmd = "@echo off`r`n`"%LOCALAPPDATA%\MCPTransfer\$Role\runtime\Scripts\python.exe`" -m mcp_transfer --home `"%LOCALAPPDATA%\MCPTransfer\$Role\data`" local-password`r`npause`r`n"
 Set-Content -Path (Join-Path $InstallRoot 'show-access-password.cmd') -Value $PasswordCmd -Encoding ASCII
 Start-Process "http://127.0.0.1:$Port"

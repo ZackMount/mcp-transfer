@@ -113,7 +113,7 @@ import socket
 import time
 from pathlib import Path
 
-port = json.loads(Path('/data/settings.json').read_text())['frp_port']
+port = json.loads(Path('/data/settings.json').read_text(encoding='utf-8-sig'))['frp_port']
 for attempt in range(30):
     try:
         with socket.create_connection(('127.0.0.1', port), timeout=1):
