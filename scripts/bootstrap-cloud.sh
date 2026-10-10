@@ -55,8 +55,19 @@ if [[ -d "$INSTALL_DIR/.git" ]]; then
   # Existing Git deployments keep their history and local edits. Fetch publicly
   # without needing a configured GitHub account or changing the saved remote.
   command -v git >/dev/null || { printf 'Existing Git checkout needs Git to update safely.\n' >&2; exit 1; }
-  git -C "$INSTALL_DIR" -c credential.helper= fetch https://github.com/ZackMount/mcp-transfer.git main
-  git -C "$INSTALL_DIR" merge --ff-only FETCH_HEAD
+  GIT_RUN=(git -c "safe.directory=$INSTALL_DIR" -c core.hooksPath=/dev/null -C "$INSTALL_DIR")
+  if [[ $EUID == 0 && "$(uname -s)" == Linux ]]; then
+    REPO_OWNER="$(stat -c %U "$INSTALL_DIR/.git")"
+    if [[ "$REPO_OWNER" != root && "$REPO_OWNER" != UNKNOWN ]]; then
+      if command -v runuser >/dev/null; then
+        GIT_RUN=(runuser -u "$REPO_OWNER" -- "${GIT_RUN[@]}")
+      else
+        printf 'Update this existing checkout as its owner (%s), then run its installer.\n' "$REPO_OWNER" >&2; exit 1
+      fi
+    fi
+  fi
+  "${GIT_RUN[@]}" -c credential.helper= fetch https://github.com/ZackMount/mcp-transfer.git main
+  "${GIT_RUN[@]}" merge --ff-only FETCH_HEAD
 else
   STAGING="$(mktemp -d)"
   trap 'rm -rf -- "$STAGING"' EXIT
