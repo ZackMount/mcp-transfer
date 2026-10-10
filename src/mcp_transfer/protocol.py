@@ -108,6 +108,7 @@ class Actor:
         self.error = None
         self.app = None
         self.last_used = time.monotonic()
+        self.active = 0
         self.task = asyncio.create_task(self.run())
 
     async def run(self):

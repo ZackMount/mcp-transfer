@@ -45,6 +45,13 @@ class Invite(Base):
     used: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class ConsumedRefresh(Base):
+    __tablename__ = "consumed_refresh_tokens"
+    hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    device_id: Mapped[str] = mapped_column(String(64), index=True)
+    expires: Mapped[float] = mapped_column(Float)
+
+
 class Service(Base):
     __tablename__ = "services"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

@@ -72,7 +72,11 @@ async def run_cloud(settings: Settings, no_frp=False):
     )
     plugin = uvicorn.Server(
         uvicorn.Config(
-            create_frp_plugin(settings), host="127.0.0.1", port=17900, access_log=False, proxy_headers=False
+            create_frp_plugin(settings),
+            host="127.0.0.1",
+            port=int(settings.data.get("plugin_port", 17900)),
+            access_log=False,
+            proxy_headers=False,
         )
     )
     frp = FrpProcess(settings, "frps")

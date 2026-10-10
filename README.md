@@ -4,6 +4,8 @@
 
 主机端将本机 HTTP、stdio 或旧 SSE MCP 接入平台，frp 只把主机适配入口映射到云服务器的 loopback。公司客户端只向云端发起 HTTPS 请求，再向本机 AI 应用提供 MCP 接口；不使用 VPN、虚拟网卡、Tailscale 或公司内网入站连接。
 
+界面预览：[云端](docs/cloud-ui.jpg) · [主机端](docs/host-ui.jpg) · [客户端](docs/client-ui.jpg)。截图来自本地验证环境，不代表已部署到你的云服务器。
+
 ```text
 AI 应用 → 本机 stdio 桥 / HTTP 映射 → 云端 HTTPS 鉴权网关
                                       ↓
@@ -160,7 +162,7 @@ MCPT_E2E=1 .venv/bin/pytest tests/test_e2e.py -q
 .venv/bin/python -m build
 ```
 
-集成测试下载固定版本 frp，启动真实 HTTPS、mTLS、frps/frpc 和 MCP 子进程，验证工具过滤、调用与设备撤销。GitHub Actions 在 Windows/Linux 运行基础测试，在 Linux 运行完整通道测试和 Docker 构建。不要把未通过这些测试的修改直接部署到生产机器。
+集成测试下载固定版本 frp，启动真实 mTLS、frps/frpc 和 MCP 子进程，验证新旧协议、工具过滤、调用与设备撤销。GitHub Actions 在 Windows/Linux 运行测试，在 Linux 额外验证公网侧 HTTPS 和 Docker 构建。Windows/macOS 的测试专用云端入口使用 loopback HTTP，因为 Go 的系统证书库不会读取测试的 SSL_CERT_FILE；frp 和内部适配连接仍验证 mTLS。生产部署始终使用 HTTPS。不要把未通过这些测试的修改直接部署到生产机器。
 
 本机试运行云端：
 

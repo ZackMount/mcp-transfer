@@ -18,9 +18,13 @@ VERSION = "0.68.0"
 
 async def download_frp(home: Path, binary: str) -> Path:
     system = {"Windows": "windows", "Darwin": "darwin", "Linux": "linux"}.get(platform.system())
-    architecture = {"x86_64": "amd64", "AMD64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(
-        platform.machine()
-    )
+    architecture = {
+        "x86_64": "amd64",
+        "AMD64": "amd64",
+        "aarch64": "arm64",
+        "arm64": "arm64",
+        "ARM64": "arm64",
+    }.get(platform.machine())
     if not system or not architecture:
         raise RuntimeError("Unsupported frp platform")
     executable = home / "bin" / (binary + (".exe" if system == "windows" else ""))
@@ -78,7 +82,7 @@ log.level = "warn"
 
 [[httpPlugins]]
 name = "mcp-transfer-policy"
-addr = "127.0.0.1:17900"
+addr = "127.0.0.1:{int(settings.data.get("plugin_port", 17900))}"
 path = "/internal/frp"
 ops = ["Login", "NewProxy", "Ping", "NewWorkConn", "NewUserConn"]
 """
@@ -127,6 +131,8 @@ class FrpProcess:
         if self.process and self.process.returncode is None:
             return
         executable = await download_frp(self.settings.home, self.binary)
+        if self.log:
+            self.log.close()
         self.log = open(self.settings.home / f"{self.binary}.log", "ab", buffering=0)
         self.process = await asyncio.create_subprocess_exec(
             str(executable),

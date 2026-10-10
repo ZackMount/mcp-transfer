@@ -59,14 +59,16 @@ async def serve(application, port, **kwargs):
     os.environ.get("MCPT_E2E") != "1",
     reason="Set MCPT_E2E=1 to download pinned frp and run real TLS integration",
 )
-async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["auto", "legacy"])
+async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mode):
     cloud_port, adapter_port, client_port = available_port(), available_port(), available_port()
     cloud_settings = Settings(tmp_path / "cloud")
     cloud_settings.data["frp_port"] = available_port()
+    cloud_settings.data["plugin_port"] = available_port()
     cloud_settings.save()
     # Go uses the macOS system trust store instead of SSL_CERT_FILE. Keep the
     # test-only cloud origin on loopback HTTP there; Linux CI exercises HTTPS.
-    use_https = sys.platform != "darwin"
+    use_https = sys.platform.startswith("linux")
     public = f"{'https' if use_https else 'http'}://127.0.0.1:{cloud_port}"
     initialize_cloud(cloud_settings, public, password="integration-password-123", development=not use_https)
     cloud = create_cloud(cloud_settings)
@@ -100,7 +102,7 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch):
                     else {}
                 ),
             ),
-            serve(create_frp_plugin(cloud_settings), 17900),
+            serve(create_frp_plugin(cloud_settings), cloud_settings.data["plugin_port"]),
         ):
             async with httpx.AsyncClient(base_url=public, verify=ca, trust_env=False) as admin:
                 login = await admin.post(
@@ -171,6 +173,7 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch):
                                     f"http://127.0.0.1:{client_port}/mcp/srv_demo", http_client=http
                                 ),
                                 cache=None,
+                                mode=mode,
                             ) as mcp:
                                 listed = await mcp.list_tools()
                                 assert [tool.name for tool in listed.tools] == ["add"]

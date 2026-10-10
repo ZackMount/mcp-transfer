@@ -182,7 +182,7 @@ class Agent:
             if item.get("enabled", True) and sid in allowed
         ]
 
-    def subscribe(self, ids: list[str]):
+    def subscribe(self, ids: list[str], enable_existing=False):
         allowed = {s["id"] for s in self.catalog}
         if any(sid not in allowed for sid in ids):
             raise ValueError("A selected server is not in the authorized catalog")
@@ -190,7 +190,7 @@ class Agent:
         for sid in ids:
             if sid not in mappings:
                 mappings[sid] = {"token": secrets.token_urlsafe(32), "enabled": True}
-            elif not self.settings.data.get("subscribe_all"):
+            elif enable_existing:
                 mappings[sid]["enabled"] = True
         self.vault.update(mappings=mappings)
 
@@ -209,7 +209,7 @@ class Agent:
                         await actor.close()
                     self.actors.clear()
             for key, actor in list(self.actors.items()):
-                if actor.last_used < time.monotonic() - 300:
+                if actor.active == 0 and actor.last_used < time.monotonic() - 300:
                     await actor.close()
                     self.actors.pop(key, None)
             try:
@@ -291,11 +291,12 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
     web = Path(__file__).parent / "web"
     app.mount("/static", StaticFiles(directory=web, check_dir=False), name="static")
     sessions = {}
+    cookie_name = f"mcpt_{agent.role}_{agent.port}"
     previews = {}
     rate = RateLimiter()
 
     def local_user(request: Request):
-        value = request.cookies.get("mcpt_local", "")
+        value = request.cookies.get(cookie_name, "")
         login = sessions.get(digest(value))
         if not login or login[1] < time.time():
             raise HTTPException(401, "Enter this agent's local access password")
@@ -323,7 +324,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         value, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(24)
         sessions[digest(value)] = (csrf, time.time() + 8 * 3600)
         response = JSONResponse({"csrf": csrf})
-        response.set_cookie("mcpt_local", value, httponly=True, samesite="strict", max_age=8 * 3600)
+        response.set_cookie(cookie_name, value, httponly=True, samesite="strict", max_age=8 * 3600)
         return response
 
     @app.get("/api/me")
@@ -333,9 +334,9 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
     @app.post("/api/auth/logout")
     async def logout(request: Request):
         local_user(request)
-        sessions.pop(digest(request.cookies.get("mcpt_local", "")), None)
+        sessions.pop(digest(request.cookies.get(cookie_name, "")), None)
         response = JSONResponse({"ok": True})
-        response.delete_cookie("mcpt_local")
+        response.delete_cookie(cookie_name)
         return response
 
     @app.get("/api/status")
@@ -460,6 +461,25 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         agent.vault.update(services=services)
         return {"ids": imported, "message": "Imported disabled; inspect before enabling or testing"}
 
+    @app.put("/api/servers/{sid}")
+    async def edit_server(sid: str, request: Request):
+        local_user(request)
+        if agent.role != "host":
+            raise HTTPException(403, "Host role required")
+        services = agent.vault.read().get("services", {})
+        if sid not in services:
+            raise HTTPException(404, "Service not found")
+        try:
+            services[sid] = validate_service({**services[sid], **(await request.json())})
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+        agent.vault.update(services=services)
+        for key, actor in list(agent.actors.items()):
+            if key[0] == sid:
+                await actor.close()
+                agent.actors.pop(key, None)
+        return {"ok": True}
+
     @app.post("/api/servers/{sid}/toggle")
     async def toggle(sid: str, request: Request):
         local_user(request)
@@ -500,7 +520,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             if "all" in body:
                 agent.settings.data["subscribe_all"] = bool(body["all"])
                 agent.settings.save()
-            agent.subscribe(body.get("ids", [x["id"] for x in agent.catalog]))
+            agent.subscribe(body.get("ids", [x["id"] for x in agent.catalog]), enable_existing=True)
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
         return {"ok": True}
@@ -679,7 +699,12 @@ class HostAdapter:
                     (k, v) for k, v in scope["headers"] if k.lower() not in {b"authorization", b"origin"}
                 ],
             }
-            await application(inner_scope, replay, send)
+            actor.active += 1
+            try:
+                await application(inner_scope, replay, send)
+            finally:
+                actor.active -= 1
+                actor.last_used = time.monotonic()
         except HTTPException as error:
             await JSONResponse({"detail": error.detail}, status_code=error.status_code)(scope, receive, send)
         except Exception:

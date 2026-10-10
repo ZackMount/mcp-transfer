@@ -50,6 +50,32 @@ def test_export_rejects_conflicts_and_changed_files(tmp_path):
     assert path.read_text() == "changed"
 
 
+@pytest.mark.parametrize("target", ["cursor", "codex"])
+@pytest.mark.parametrize("mode", ["stdio", "http"])
+def test_removes_revoked_platform_entries_without_other_changes(tmp_path, target, mode):
+    mappings = {"srv_a": {"token": "local-only", "enabled": True}}
+    existing = generate(target, ["srv_a"], tmp_path, mappings, 17820, mode)
+    result = generate(target, [], tmp_path, mappings, 17820, mode, existing)
+    assert "mcpt_srv_a" not in result
+
+
+def test_pythonw_agent_exports_console_python_for_stdio(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "pythonw.exe"))
+    result = json.loads(generate("cursor", ["srv_a"], tmp_path, {}, 17820))
+    assert result["mcpServers"]["mcpt_srv_a"]["command"].endswith("python.exe")
+
+
+def test_manual_mapping_enable_does_not_undo_automatic_disable(tmp_path):
+    agent = Agent(Settings(tmp_path), "client")
+    agent.catalog = [{"id": "srv_a"}]
+    agent.settings.data["subscribe_all"] = True
+    agent.vault.update(mappings={"srv_a": {"token": "local", "enabled": False}})
+    agent.subscribe(["srv_a"])
+    assert agent.vault.read()["mappings"]["srv_a"]["enabled"] is False
+    agent.subscribe(["srv_a"], enable_existing=True)
+    assert agent.vault.read()["mappings"]["srv_a"]["enabled"] is True
+
+
 def test_loopback_security_and_mapping_auth(tmp_path):
     agent = Agent(Settings(tmp_path), "client")
     with TestClient(create_agent_app(agent, background=False), base_url="http://127.0.0.1:17820") as client:

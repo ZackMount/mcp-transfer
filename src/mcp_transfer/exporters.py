@@ -62,17 +62,23 @@ def generate(
     for key in list(group):
         item = group[key]
         ours = (
-            isinstance(item, dict)
+            key.startswith("mcpt_")
+            and hasattr(item, "get")
             and item.get("args", [])[:2] == ["-m", "mcp_transfer"]
             and "connect" in item.get("args", [])
         )
+        if key.startswith("mcpt_") and hasattr(item, "get"):
+            ours = ours or item.get("url") == f"http://127.0.0.1:{port}/mcp/{key.removeprefix('mcpt_')}"
         if ours and key not in desired_names:
             del group[key]
     for sid in server_ids:
         name = "mcpt_" + sid
         if mode == "stdio":
+            executable = sys.executable
+            if Path(executable).name.lower() == "pythonw.exe":
+                executable = str(Path(executable).with_name("python.exe"))
             entry = {
-                "command": sys.executable,
+                "command": executable,
                 "args": ["-m", "mcp_transfer", "--home", str(home), "connect", "--server", sid],
             }
             if target == "vscode":

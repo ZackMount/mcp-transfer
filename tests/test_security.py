@@ -46,6 +46,8 @@ def test_refresh_rotation_reuse_revokes_device(cloud):
     device = enroll(client)
     first = device["refresh_token"]
     headers = access(client, device)
+    # A much older token must still revoke the refresh family, not just the immediately previous token.
+    headers = access(client, device)
     assert client.get("/api/catalog", headers=headers).status_code == 200
     assert client.post("/api/token", json={"refresh_token": first}).status_code == 401
     assert client.get("/api/catalog", headers=headers).status_code == 401
@@ -125,7 +127,11 @@ def test_wrong_issuer_audience_and_algorithm(cloud):
     }
     token = jwt.encode(payload, signer.private, algorithm="RS256")
     assert client.get("/api/catalog", headers={"authorization": "Bearer " + token}).status_code == 401
-    token = jwt.encode({**payload, "iss": "https://testserver"}, "attacker-secret-which-is-longer-than-32-bytes", algorithm="HS256")
+    token = jwt.encode(
+        {**payload, "iss": "https://testserver"},
+        "attacker-secret-which-is-longer-than-32-bytes",
+        algorithm="HS256",
+    )
     assert client.get("/api/catalog", headers={"authorization": "Bearer " + token}).status_code == 401
 
 

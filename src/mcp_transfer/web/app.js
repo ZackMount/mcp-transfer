@@ -89,6 +89,28 @@ async function overview(main) {
   }
 }
 
+function hostServiceForm(existing = null) {
+  const definition = existing || {};
+  const editor = form(existing ? "编辑 MCP 服务：" + definition.name : "添加 MCP 服务", [
+    input("服务名称", "name", "text", definition.name || ""),
+    selectField("传输方式", "transport", [["stdio", "stdio 子进程"], ["http", "Streamable HTTP"], ["sse", "旧 HTTP + SSE"]]),
+    input("用途说明", "description", "text", definition.description || ""),
+    input("HTTP / SSE 地址", "url", "text", definition.url || "", "仅允许明确配置的 localhost / 127.0.0.1 地址"),
+    input("stdio 可执行程序", "command", "text", definition.command || "", "例如 python、npx 或完整 exe 路径"),
+    input("stdio 参数（JSON 数组）", "args", "textarea", JSON.stringify(definition.args || [], null, 2)),
+    input("stdio 工作目录（可选）", "cwd", "text", definition.cwd || ""),
+    input("环境变量（JSON 对象，仅主机保存）", "env", "textarea", existing ? "" : "{}", existing ? "留空保留现有秘密，填写 {} 可清除" : ""),
+    input("上游请求头（JSON 对象，仅主机保存）", "headers", "textarea", existing ? "" : "{}", existing ? "留空保留现有秘密，填写 {} 可清除" : "")
+  ], existing ? "保存修改" : "保存服务", async data => {
+    for (const key of ["args", "env", "headers"]) { if (data[key].trim()) data[key] = JSON.parse(data[key]); else delete data[key]; }
+    if (existing) data.enabled = definition.enabled;
+    await api(existing ? "/api/servers/" + definition.id : "/api/servers", existing ? "PUT" : "POST", data);
+    toast("已保存，将在后台同步发布"); await render();
+  });
+  editor.classList.add("service-editor"); editor.querySelector('select[name="transport"]').value = definition.transport || "stdio";
+  return editor;
+}
+
 async function serversPage(main) {
   const servers = await api("/api/servers");
   if (state.role === "cloud") {
@@ -100,8 +122,8 @@ async function serversPage(main) {
     main.append(table(["服务", "远端状态", "本地地址", "操作"], servers.map(x => [x.name, badge(x.online ? "主机在线" : "主机离线", x.online), el("code", {}, x.local_url), el("div", { class: "actions" }, x.mapped ? action("停用映射", async () => { await api(`/api/servers/${x.id}/toggle`, "POST", {}); await render(); }) : action("启用映射", async () => { await api("/api/subscribe", "POST", { ids: [x.id] }); await render(); }))])));
     return;
   }
-  main.append(table(["服务", "传输", "状态", "操作"], servers.map(x => [el("div", {}, x.name, el("div", { class: "small muted" }, x.id)), x.transport, badge(x.enabled ? "已启用" : "已停用", x.enabled), el("div", { class: "row actions" }, action("测试", async () => { const result = await api(`/api/servers/${x.id}/test`, "POST", {}); toast("连接成功，协议 " + result.version); }), action(x.enabled ? "停用" : "启用", async () => { await api(`/api/servers/${x.id}/toggle`, "POST", {}); await render(); }))])));
-  main.append(form("添加 MCP 服务", [input("服务名称", "name"), selectField("传输方式", "transport", [["stdio", "stdio 子进程"], ["http", "Streamable HTTP"], ["sse", "旧 HTTP + SSE"]]), input("用途说明", "description"), input("HTTP / SSE 地址", "url", "text", "", "仅允许明确配置的 localhost / 127.0.0.1 地址"), input("stdio 可执行程序", "command", "text", "", "例如 python、npx 或完整 exe 路径"), input("stdio 参数（JSON 数组）", "args", "textarea", "[]"), input("stdio 工作目录（可选）", "cwd"), input("环境变量（JSON 对象，仅主机保存）", "env", "textarea", "{}"), input("上游请求头（JSON 对象，仅主机保存）", "headers", "textarea", "{}")], "保存服务", async data => { for (const key of ["args", "env", "headers"]) data[key] = JSON.parse(data[key]); await api("/api/servers", "POST", data); toast("已保存，将在后台同步发布"); await render(); }));
+  main.append(table(["服务", "传输", "状态", "操作"], servers.map(x => [el("div", {}, x.name, el("div", { class: "small muted" }, x.id)), x.transport, badge(x.enabled ? "已启用" : "已停用", x.enabled), el("div", { class: "row actions" }, action("编辑", () => { const editor = hostServiceForm(x); main.querySelector(".service-editor").replaceWith(editor); editor.scrollIntoView({ behavior: "smooth" }); }), action("测试", async () => { const result = await api(`/api/servers/${x.id}/test`, "POST", {}); toast("连接成功，协议 " + result.version); }), action(x.enabled ? "停用" : "启用", async () => { await api(`/api/servers/${x.id}/toggle`, "POST", {}); await render(); }))])));
+  main.append(hostServiceForm());
   main.append(form("导入现有 MCP 配置", [input("粘贴 mcpServers 或 servers JSON", "content", "textarea", "")], "导入为停用状态", async data => { const result = await api("/api/import", "POST", JSON.parse(data.content)); toast(`已导入 ${result.ids.length} 项，请检查后启用`); await render(); }));
 }
 

@@ -18,7 +18,18 @@ from sqlalchemy import delete, or_, select, update
 
 from . import __version__
 from .config import Settings
-from .database import Audit, Device, Grant, Invite, OAuthCode, Service, User, WebSession, database
+from .database import (
+    Audit,
+    ConsumedRefresh,
+    Device,
+    Grant,
+    Invite,
+    OAuthCode,
+    Service,
+    User,
+    WebSession,
+    database,
+)
 from .http_support import REQUEST_HEADERS, relay_response
 from .pki import PKI
 from .policy import authorize_message, parse_message
@@ -363,7 +374,12 @@ def create_cloud(settings: Settings) -> FastAPI:
         with db.begin() as session:
             device = session.scalar(select(Device).where(Device.refresh_hash == value_hash))
             if not device:
-                reused = session.scalar(select(Device).where(Device.previous_refresh == value_hash))
+                consumed = session.get(ConsumedRefresh, value_hash)
+                reused = (
+                    session.get(Device, consumed.device_id)
+                    if consumed and consumed.expires > time.time()
+                    else None
+                )
                 if reused:
                     reused.active = False
             else:
@@ -381,6 +397,10 @@ def create_cloud(settings: Settings) -> FastAPI:
                 )
                 if result.rowcount != 1:
                     raise HTTPException(401, "Refresh credential was already rotated")
+                session.add(
+                    ConsumedRefresh(hash=value_hash, device_id=device.id, expires=device.created + 90 * 86400)
+                )
+                session.execute(delete(ConsumedRefresh).where(ConsumedRefresh.expires < time.time()))
                 if resource:
                     if not resource.startswith(public + "/mcp/"):
                         raise HTTPException(400, "Invalid resource")
