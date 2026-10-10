@@ -28,20 +28,20 @@ AI 应用 → 本机 stdio 桥 / HTTP 映射 → 云端 HTTP(S) 鉴权网关
 
 ## 一行部署
 
-这是私有仓库，因此每台需要下载源代码的机器必须已有 **Git、GitHub CLI** 并通过 `gh auth login` 获得此仓库的读取权限。不要把 GitHub Token 写入部署命令或发送到聊天中。也可将仓库源码通过公司批准的方式复制到目标机器，直接运行安装脚本。
+这是公开仓库。下面的下载入口无需 Git、GitHub CLI、GitHub 账号或 Token；目标机器需要能够访问 GitHub 的公开下载地址。也可将源码通过公司批准的方式复制到目标机器，直接运行安装脚本。
 
-首次部署在目标目录尚不存在的位置执行。Windows 使用普通用户 PowerShell；本机策略需要允许运行已审阅的安装脚本。安装程序不修改 PowerShell 安全策略。
+云端默认安装到 `/opt/mcp-transfer`；若检测到已有 Compose 部署，会沿用原目录，避免丢失密钥。可以用 `--install-dir /原部署目录` 显式指定。Windows 使用普通用户 PowerShell；本机策略需要允许运行已审阅的安装脚本。安装程序不修改 PowerShell 安全策略。
 
 ### 云端 · Linux
 
 ```bash
-gh repo clone ZackMount/mcp-transfer && sudo bash mcp-transfer/scripts/install-cloud.sh
+curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash
 ```
 
 安装时输入完整入口地址，例如 `https://mcp.example.com`。HTTPS 域名需要先解析到云服务器，也可以预先指定：
 
 ```bash
-gh repo clone ZackMount/mcp-transfer && sudo bash mcp-transfer/scripts/install-cloud.sh --domain mcp.example.com
+curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash -s -- --domain mcp.example.com
 ```
 
 Ubuntu 24.04 会自动安装 Docker 与 Compose；其他 Linux 发行版需要先安装 Docker Engine 和 Compose v2。该部署使用 Linux host networking，不适用于 Docker Desktop 的默认网络模式。
@@ -61,22 +61,22 @@ WebUI 和 MCP API 共用一个公网入口端口，frp 使用另一个独立端�
 首次部署，替换示例 IP 后运行：
 
 ```bash
-gh repo clone ZackMount/mcp-transfer && sudo bash mcp-transfer/scripts/install-cloud.sh --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http
+curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash -s -- --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http
 ```
 
 该模式无需域名和 HTTPS 证书，只需放行所选的 TCP 18080、17000，不会额外开启本服务的 80/443，也不会自动跳转 HTTPS。`--allow-insecure-http` 必须显式指定；选择 HTTP 后，后续无参数升级会保留已选择的模式。
 
 **公网 HTTP 会明文传输登录密码、刷新凭证、访问 Token 和 MCP 内容，可能被窃听或篡改。** 更换端口无法消除这个风险；frp TLS 和网关到主机的 mTLS 继续保留，但不能保护客户端到公网 HTTP 入口这一段。此模式不满足标准 OAuth/MCP 授权的 HTTPS 安全要求，部分第三方直连客户端可能拒绝 HTTP；平台自己的客户端代理支持该模式。
 
-已有部署更换地址、协议或公网入口端口，在源码目录运行：
+已有部署更换地址、协议或公网入口端口：
 
 ```bash
-git pull --ff-only && sudo bash scripts/install-cloud.sh --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http --migrate-origin
+curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash -s -- --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http --migrate-origin
 ```
 
 迁移会备份 `.env`、保留管理员、用户、服务、授权、设备身份和签名 / CA 密钥，清理旧 Web 登录会话和待兑换授权码，并重启入口与云服务。进行中的调用会中断，不会自动重放；初始管理员密码不会重新生成。
 
-两台 Windows 都要更新到 v0.1.1：在已下载的源码目录 `git pull --ff-only`，重新运行原角色的安装脚本。然后分别在本地 WebUI 的「设置 → 更改云端入口」填写完整新地址，并勾选「允许明文 HTTP」。无需重新生成接入码，原服务定义和本地映射会保留。新登记设备则在首次连接页面勾选同一选项；安装脚本也支持 `-AllowInsecureHttp`。
+两台 Windows 都要更新到 v0.1.1：重新运行下方对应角色的一行下载命令即可，数据与设备身份保留。然后分别在本地 WebUI 的「设置 → 更改云端入口」填写完整新地址，并勾选「允许明文 HTTP」。无需重新生成接入码，原服务定义和本地映射会保留。新登记设备则在首次连接页面勾选同一选项；安装脚本也支持 `-AllowInsecureHttp`。
 
 若仅修改 frp 端口而保持公网 Web 地址不变，使用 `sudo bash scripts/install-cloud.sh --frp-port 17000`；升级后的主机端会在下一次心跳自动获取新端口并重连，客户端不需要修改地址。
 
@@ -91,7 +91,7 @@ bash scripts/install-cloud.sh --public-url http://203.0.113.10:18080 --frp-port 
 ### 主机端 · Windows
 
 ```powershell
-gh repo clone ZackMount/mcp-transfer "$env:LOCALAPPDATA\MCPTransfer-src"; if ($LASTEXITCODE -ne 0) { throw '仓库下载失败' }; & "$env:LOCALAPPDATA\MCPTransfer-src\scripts\install-windows.ps1" -Role host
+$p=Join-Path $env:TEMP 'mcp-transfer-bootstrap.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-windows.ps1' -ErrorAction Stop -OutFile $p; & $p -Role host
 ```
 
 安装程序自动准备 Python 3.12 独立环境、依赖和 frpc，创建当前用户登录时启动的计划任务，显示本地访问密码并打开 `http://127.0.0.1:17810`。没有 Python 时需要 Windows App Installer 提供的 `winget`。
@@ -99,10 +99,10 @@ gh repo clone ZackMount/mcp-transfer "$env:LOCALAPPDATA\MCPTransfer-src"; if ($L
 ### 客户端 · Windows
 
 ```powershell
-gh repo clone ZackMount/mcp-transfer "$env:LOCALAPPDATA\MCPTransfer-src"; if ($LASTEXITCODE -ne 0) { throw '仓库下载失败' }; & "$env:LOCALAPPDATA\MCPTransfer-src\scripts\install-windows.ps1" -Role client
+$p=Join-Path $env:TEMP 'mcp-transfer-bootstrap.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-windows.ps1' -ErrorAction Stop -OutFile $p; & $p -Role client
 ```
 
-完成后打开 `http://127.0.0.1:17820`。客户端不安装或运行 frp，不需要开放任何入站端口。同一电脑同时安装两种角色时，第二次直接运行已经下载的安装脚本即可，无需再次 clone。
+完成后打开 `http://127.0.0.1:17820`。客户端不安装或运行 frp，不需要开放任何入站端口。同一电脑可分别运行两种角色的安装命令。公开源码下载仍使用 HTTPS，和平台入口选择 HTTP 是两回事。
 
 若已将源码复制到目标 Windows 机器，在源码根目录只需：
 
@@ -166,7 +166,9 @@ WebUI 和 MCP 路由共用监听端口，但使用不同的认证方式：WebUI 
 
 ## 更新、日志与卸载
 
-云端升级：先备份，再在源码目录 `git pull --ff-only`，重新运行 `sudo bash scripts/install-cloud.sh`。初始化不会重置已有管理员。
+云端升级：先备份，再重新运行公开下载入口；会自动沿用已有部署目录和配置，不重置管理员。若旧容器已被删除，请用 `--install-dir` 指向原目录。发现已有数据库卷但找不到相应 CA / 签名密钥时，下载入口会停止，避免用新身份覆盖原部署。
+
+已有 Git checkout 会通过公开 HTTPS 地址执行快进更新，不要求 GitHub 登录，也不会强制覆盖本地改动。全新安装通过压缩包下载，完全不需要 Git。
 
 ```bash
 docker compose ps
@@ -174,7 +176,7 @@ docker compose logs -f --tail=100 cloud caddy
 sudo tail -n 100 data/cloud/frps.log
 ```
 
-Windows 更新：在源码目录 `git pull --ff-only` 后重新运行相应角色安装脚本；保留数据、配置和 DPAPI 凭证。宿主重启需重新登录用户，后台任务才会启动。
+Windows 更新：重新运行对应角色的公开下载命令；保留数据、配置和 DPAPI 凭证。下载源码缓存在 `%LOCALAPPDATA%\MCPTransfer-source`，与运行数据分开。宿主重启需重新登录用户，后台任务才会启动。
 
 ```powershell
 Get-ScheduledTask -TaskName 'MCPTransfer-*'

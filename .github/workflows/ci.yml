@@ -33,6 +33,10 @@ jobs:
             [System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$parseErrors) | Out-Null
             if ($parseErrors) { $parseErrors | Format-List; exit 1 }
           }
+      - name: Anonymous Windows source download
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/bootstrap-windows.ps1 -Role client -PrepareOnly
       - run: python -m build
   integration:
     runs-on: ubuntu-latest
@@ -55,3 +59,5 @@ jobs:
           assert not any(server.get('tls_connection_policies') for server in servers)
           PY
       - run: docker build -t mcp-transfer:test .
+      - name: Anonymous Linux source download
+        run: bash scripts/bootstrap-cloud.sh --prepare-only --install-dir "$RUNNER_TEMP/mcp-transfer-download"

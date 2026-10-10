@@ -39,6 +39,10 @@ if ($Role -eq 'host') {
     & $RuntimePython -m mcp_transfer --home $DataRoot install-frp --binary frpc
     if ($LASTEXITCODE -ne 0) { throw 'frp download or checksum verification failed.' }
 }
+if ($Port -eq 0 -and (Test-Path (Join-Path $DataRoot 'settings.json'))) {
+    $SavedSettings = Get-Content -Raw -LiteralPath (Join-Path $DataRoot 'settings.json') | ConvertFrom-Json
+    if ($SavedSettings.PSObject.Properties.Name -contains 'ui_port') { $Port = [int]$SavedSettings.ui_port }
+}
 if ($Port -eq 0) { if ($Role -eq 'host') { $Port = 17810 } else { $Port = 17820 } }
 if ($Port -lt 1024 -or $Port -gt 65535) { throw 'Port must be between 1024 and 65535.' }
 $PythonW = Join-Path $RuntimeRoot 'Scripts\pythonw.exe'
