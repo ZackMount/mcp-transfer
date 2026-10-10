@@ -170,7 +170,7 @@ def create_cloud(settings: Settings) -> FastAPI:
 
     @app.get("/healthz")
     async def health():
-        return {"status": "ok", "version": __version__}
+        return {"status": "ok", "role": "cloud", "version": __version__}
 
     @app.get("/api/info")
     async def info():

@@ -277,8 +277,9 @@ async function navigate(page) { state.page = page; await render(); }
 async function render() {
   const renderId = ++state.renderId;
   if (!state.me) return loginScreen();
-  const connectionInfo = await api("/api/info");
   const connections = state.role !== "cloud" ? await api("/api/connections", "GET", undefined, true) : [];
+  if (state.role !== "cloud" && !connections.some(item => item.id === state.connection)) state.connection = "primary";
+  const connectionInfo = await api("/api/info");
   const available = state.role === "cloud" ? ["overview", "servers", "devices", "grants", ...(state.me.admin ? ["users"] : []), "audit", "settings"] : ["overview", "connections", "servers", ...(state.role === "client" ? ["exports"] : []), "settings"];
   if (!available.includes(state.page)) state.page = "overview";
   const main = el("main", { class: "main" }, el("header", { class: "topbar" }, el("div", {}, el("h1", {}, pages[state.page]), el("span", { class: "muted" }, titles[state.role])), el("div", { class: "row" }, action("刷新", render), action("退出", async () => { await api("/api/auth/logout", "POST", {}, true); state.connection = "primary"; state.me = null; state.csrf = ""; await render(); }))));

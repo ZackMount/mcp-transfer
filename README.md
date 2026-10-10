@@ -23,10 +23,12 @@ AI 应用 → 本机 stdio 桥 / HTTP 映射 → 云端 HTTP(S) 鉴权网关
 - frp 0.68.0 固定版本下载与 SHA-256 核验；逐主机 OIDC 凭证、TLS 双向验证、服务端端口归属插件。
 - 网关到主机适配器另有 mTLS 和目标绑定的短期调用票据，云端令牌不会透传到原 MCP。
 - HTTP MCP 流式转发；stdio / SSE 使用官方 MCP Python SDK 2.3.0 适配；按用户、客户端和连接隔离适配进程。
-- 客户端服务目录同步、批量订阅、单端口多路径映射、后台续期。
+- 同一主机／客户端同时连接多台云服务器，独立凭证、目录、隧道和连接状态，共用一个本地 WebUI。
+- 客户端服务目录同步、批量订阅、单端口多路径映射、后台续期；跨云合并导出保留其他连接的配置。
+- 云端请求／SSE 并发、主机适配实例／会话上限可在 WebUI 设置；HTTP 页面兼容复制接入码。
 - 通用 JSON、Cursor、VS Code、Claude Desktop 和 Codex TOML 配置生成；预览差异、备份、原子写入和可选自动同步。
 - stdio 导出不包含云端密钥；HTTP 导出使用独立的本地映射令牌。
-- Windows 当前用户后台任务、自启动、DPAPI 凭证保护；云端 Docker Compose、PostgreSQL、可选 HTTPS / 显式 HTTP 与自定义公网端口。
+- Windows 当前用户后台任务、自启动、DPAPI 凭证保护；frpc 后台运行不创建控制台黑窗口。云端支持 Docker Compose + PostgreSQL，或 Linux 原生 Python + SQLite + systemd 部署。
 
 ## 一行部署
 
@@ -86,7 +88,7 @@ curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts
 
 迁移会备份 `.env`、保留管理员、用户、服务、授权、设备身份和签名 / CA 密钥，清理旧 Web 登录会话和待兑换授权码，并重启入口与云服务。进行中的调用会中断，不会自动重放；初始管理员密码不会重新生成。
 
-两台 Windows 都要更新到 v0.1.1：重新运行下方对应角色的一行下载命令即可，数据与设备身份保留。然后分别在本地 WebUI 的「设置 → 更改云端入口」填写完整新地址，并勾选「允许明文 HTTP」。无需重新生成接入码，原服务定义和本地映射会保留。新登记设备则在首次连接页面勾选同一选项；安装脚本也支持 `-AllowInsecureHttp`。
+两台 Windows 更新到当前版本：重新运行下方对应角色的一行下载命令即可，数据与设备身份保留。然后分别在本地 WebUI 的「设置 → 更改云端入口」填写完整新地址，并勾选「允许明文 HTTP」。无需重新生成接入码，原服务定义和本地映射会保留。新登记设备则在首次连接页面勾选同一选项；安装脚本也支持 `-AllowInsecureHttp`。
 
 若仅修改 frp 端口而保持公网 Web 地址不变，使用 `sudo bash scripts/install-cloud.sh --frp-port 17000`；升级后的主机端会在下一次心跳自动获取新端口并重连，客户端不需要修改地址。
 
@@ -176,9 +178,27 @@ docker compose restart cloud
 
 客户端能检测出工具而 Cursor 仍没有工具时，重新选择 **Cursor** 导出，通过「备份并写入配置」写入 `%USERPROFILE%\.cursor\mcp.json`，然后刷新或重启 Cursor。同时检查项目 `.cursor/mcp.json` 是否还有旧条目，以及 Cursor 的 MCP 输出日志。stdio 桥必须由安装时的同一 Windows 用户运行，才能读取该用户 DPAPI 保护的本地凭证。主机与客户端无需使用相同 Windows 用户。
 
-### 删除旧设备并重新登记
+### 多台云服务器同时接入（v0.2.0）
 
-设备页可以直接「删除」设备及其云端服务和授权，或点击「清理所有已撤销设备」批量清理旧记录。主机端和客户端的概览都提供「重新登记」，输入普通的一次性接入码即可，使用方式与首次接入相同。
+主机端和客户端都在「云端连接 → 添加云端连接」填写新云端的地址、设备名称和该云端生成的普通一次性接入码。旧连接持续运行；侧栏选择连接仅切换正在查看的目录和配置。每个连接最多连接一台云服务器，当前支持 20 个连接。
+
+已有安装自动作为默认连接保留，身份和服务 ID 不变，无需重新登记。新增连接使用独立的数据目录、证书和刷新凭证。主机为每个连接提供独立的 loopback TLS 适配端口和 frpc；客户端的所有连接仍只使用 HTTP(S) 网关，不安装／加载 frp，不访问 frp 接入端口。
+
+主机的新连接默认没有服务。可以选择复制默认连接的服务定义，复制项保持停用，检查后逐项启用。不同云端的发布配置可以独立编辑，不会修改原连接。不要同时启动会争用同一个本机端口的 MCP 子进程。
+
+客户端可分别同步和订阅，然后在「配置导出」选择「所有云端连接」合并生成 Cursor／其他应用配置。同名服务以及不同云端相同的服务 ID 会生成不同条目；导出当前连接也不会删除其他连接的条目。多个客户端安装不要同时自动写同一应用文件。
+
+额外连接可以直接移除，先撤销该云端设备再归档本机配置到 `data/removed-connections`；网络失败会保留连接供重试。默认连接为兼容已有导出路径而保留，可用下面的替换操作重新登记。
+
+### 并发限制
+
+云端管理员「设置 → 每设备并发限制」：MCP POST／DELETE 请求默认 32，长期 SSE GET 连接默认 128，分别计数。额度按客户端设备计算，覆盖该设备访问的全部服务。保存立即影响新请求，不取消已经执行的调用。达到上限返回 HTTP 429 和 Retry-After；非法请求、网络失败、取消和流关闭都会释放额度，不会自动重放工具调用。
+
+主机「设置 → 主机适配并发限制」：每个云端连接的 MCP 适配实例默认 64，每实例会话默认 8。实例按服务、用户、客户端设备和应用连接隔离，空闲 5 分钟后回收。实例数限制立即影响新实例，会话限制应用于新建实例。原生 HTTP MCP 的内部会话限制由上游自身管理。所有上述上限接受 0–4096，0 表示不限。
+
+### 删除旧设备并替换当前登记
+
+设备页可以直接「删除」设备及其云端服务和授权，或点击「清理所有已撤销设备」批量清理旧记录。主机端和客户端的概览都提供「替换当前登记」，仅在当前登记失效时使用普通一次性接入码替换身份。需要增加另一台云服务器时使用「添加云端连接」，避免替换现有连接。
 
 主机重新登记保留本机 MCP 命令、参数、环境变量和服务名称，生成新的服务 ID 并重新发布。客户端重新同步并订阅授权目录，然后重新生成 AI 应用配置。旧设备和旧授权可以删除，无需恢复码或服务身份迁移。
 
@@ -204,6 +224,68 @@ docker compose restart cloud
 - 公司客户端需获准访问配置的云地址、端口及流式响应；选择自定义 HTTP 端口并不意味着公司出口一定放行。支持显式 HTTP(S) 代理及企业 CA 文件；不自动绕过代理、导入根证书、修改路由或关闭 TLS 证书验证。Windows PAC / 集成认证未自动适配。
 - 当前发布为**单云节点、单 Python worker**部署；旧协议会话路由和本机会话位于内存，云端重启会中断这些会话。不要自行增加 Uvicorn workers。
 
+## Linux 非 Docker 部署
+
+原生版安装到 `/opt/mcp-transfer`，不安装 Docker，不安装 PostgreSQL；采用 SQLite WAL、独立 Python 3.12 环境和专用 `mcp-transfer` 系统账号，由 systemd 随开机启动。自动部署支持 x86_64／arm64 Linux + systemd，HTTP 公网端口需为 1024–65535。Ubuntu 22.04/24.04 已加入真实安装、升级、健康检查和卸载验证。
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash -s -- --native --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http
+```
+
+`--native` 必须在后续更新时保留；不再传地址会沿用原配置。初次会下载安装固定版本 uv，校验 SHA-256，再准备专用 Python；不会替换系统 Python。应用以普通系统用户直接监听指定 HTTP 端口，frp TLS／内部 mTLS 保留。临时 `--download-proxy` 和 `--pip-index-url` 也支持原生部署，下载结束后不会写入 systemd 服务。
+
+自动原生安装当前面向 HTTP 场景；HTTPS 可以手工准备 Python 环境，运行 `cloud-init --public-url https://域名` 与默认 loopback `cloud`，通过已有 HTTPS 反向代理保留 Host 头转发至 `127.0.0.1:17800`。需要一键申请 HTTPS 证书时使用 Docker 部署。
+
+原生升级创建新的 Python 环境，保留数据库、管理员和 CA／签名密钥，下载完成后再短暂停机切换。服务启动失败会报错并保留前一个 Python 环境；旧数据库与密钥不会被新建。SQLite 适用于单云节点、单进程部署，不能通过增加 Uvicorn worker 扩容。
+
+```bash
+sudo systemctl start mcp-transfer-cloud
+sudo systemctl restart mcp-transfer-cloud
+sudo systemctl stop mcp-transfer-cloud
+sudo systemctl status mcp-transfer-cloud --no-pager
+sudo journalctl -u mcp-transfer-cloud -f
+```
+
+Docker 与原生版使用不同的数据库类型，不能通过直接加减 `--native` 无损切换。安装器会拒绝直接切换；下面的 `--clean` 用于明确删除旧平台后全新安装，三端需要重新登记。
+
+## 完整清理与重新安装
+
+普通更新保留数据。只有显式添加 `--clean`／`-Clean` 才会删除平台数据；云端会删除管理员、用户、设备、服务授权、数据库和私钥，生成全新身份。先停机备份需要保留的数据；这不是无损迁移。
+
+云端全新重装为原生版（去掉 `--native` 即重装 Docker 版）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-cloud.sh | sudo bash -s -- --clean --native --public-url http://203.0.113.10:18080 --frp-port 17000 --allow-insecure-http
+```
+
+Windows 全新重装主机，角色改为 client 可清理客户端并重新安装：
+
+```powershell
+Set-Location $env:TEMP; $p=Join-Path $env:TEMP 'mcp-transfer-bootstrap.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/ZackMount/mcp-transfer/main/scripts/bootstrap-windows.ps1' -ErrorAction Stop -OutFile $p; & $p -Role host -AllowInsecureHttp -Clean
+```
+
+Windows 清理仅针对当前用户所选角色，先停止其后台任务、所有云端 frpc 和本机 stdio 桥，再删除该角色的运行环境、凭证、连接与服务定义；另一角色、系统 Python 和外部 MCP 项目目录保持不变。客户端清理会备份并移除本安装在应用配置中的条目，保留其他 MCP 和其他设置。JSONC／损坏配置会报告无法安全合并，保留原文件和数据，不强制覆盖；手工移除本平台条目后重试。源码下载缓存与运行数据独立，不作为设备凭证使用。删除本机文件不会自动清除远端设备记录，请在各云端设备页删除旧设备。
+
+只卸载、不重装：
+
+```bash
+# 停止平台，保留数据和源码
+sudo bash /opt/mcp-transfer/scripts/uninstall-cloud.sh
+# 完全删除本平台容器／数据库卷或原生服务、运行数据和源码
+sudo bash /opt/mcp-transfer/scripts/uninstall-cloud.sh --purge --yes
+```
+
+```powershell
+# 停止当前用户客户端，保留数据
+& .\scripts\uninstall-windows.ps1 -Role client
+# 删除客户端运行环境／凭证，并清理它导出的应用配置
+& .\scripts\uninstall-windows.ps1 -Role client -Purge -RemoveExports
+# 删除主机运行环境／凭证／本机定义
+& .\scripts\uninstall-windows.ps1 -Role host -Purge
+```
+
+清理脚本校验安装目录及资源归属，不删除其他系统服务、Docker Engine、系统 Python 或全局代理设置。
+
 ## 更新、日志与卸载
 
 云端升级：先备份，再重新运行公开下载入口；会自动沿用已有部署目录和配置，不重置管理员。若旧容器已被删除，请用 `--install-dir` 指向原目录。发现已有数据库卷但找不到相应 CA / 签名密钥时，下载入口会停止，避免用新身份覆盖原部署。
@@ -223,9 +305,9 @@ Get-ScheduledTask -TaskName 'MCPTransfer-*'
 & .\scripts\uninstall-windows.ps1 -Role client
 ```
 
-卸载脚本只停止任务，不删除数据。先在云端撤销设备，再按需删除本机目录和导出的配置。
+默认卸载保留数据；需要完全删除时使用上述 `-Purge`／`--purge --yes`。
 
-备份需要包含 PostgreSQL、`data/cloud` 下的 CA / 签名密钥及 `.env`。将备份加密并限制访问；只备份数据库无法恢复完整身份系统。
+Docker 备份需要包含 PostgreSQL、`data/cloud` 下的 CA / 签名密钥及 `.env`；原生版停机备份 `data/cloud`（包括 SQLite）与 `.native.env`。将备份加密并限制访问；只备份数据库无法恢复完整身份系统。
 
 ## 开发与验证
 

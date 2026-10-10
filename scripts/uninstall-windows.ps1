@@ -8,6 +8,8 @@ if ($env:OS -ne 'Windows_NT') { throw 'This uninstaller requires Windows.' }
 $InstallRoot = Join-Path $env:LOCALAPPDATA "MCPTransfer\$Role"
 $DataRoot = Join-Path $InstallRoot 'data'
 $RuntimePython = Join-Path $InstallRoot 'runtime\Scripts\python.exe'
+Set-Location -LiteralPath $env:TEMP
+[System.Environment]::CurrentDirectory = $env:TEMP
 $TaskName = "MCPTransfer-$Role"
 . (Join-Path $PSScriptRoot 'windows-runtime.ps1')
 Stop-McpAgent -Role $Role -DataRoot $DataRoot -IncludeBridges:$Purge

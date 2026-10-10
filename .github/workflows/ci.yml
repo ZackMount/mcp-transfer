@@ -79,6 +79,7 @@ jobs:
         run: bash scripts/bootstrap-cloud.sh --prepare-only --install-dir "$RUNNER_TEMP/mcp-transfer-download"
   native-deployment:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-22.04, ubuntu-24.04]
     runs-on: ${{ matrix.os }}

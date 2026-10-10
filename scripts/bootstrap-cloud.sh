@@ -50,7 +50,7 @@ INSTALL_DIR="${INSTALL_DIR:-/opt/mcp-transfer}"
 if [[ -d "$INSTALL_DIR" && -n "$(ls -A "$INSTALL_DIR")" && ! -f "$INSTALL_DIR/src/mcp_transfer/__init__.py" ]]; then
   printf 'Selected directory is nonempty and is not an MCP Transfer source directory. Refusing to overwrite it.\n' >&2; exit 1
 fi
-if command -v docker >/dev/null && docker volume inspect mcp-transfer_postgres_data >/dev/null 2>&1; then
+if [[ "$CLEAN" != 1 ]] && command -v docker >/dev/null && docker volume inspect mcp-transfer_postgres_data >/dev/null 2>&1; then
   if [[ ! -f "$INSTALL_DIR/data/cloud/settings.json" || ! -f "$INSTALL_DIR/data/cloud/pki/ca.key" || ! -f "$INSTALL_DIR/data/cloud/signing.key" ]]; then
     printf 'An existing database volume was found, but the selected directory lacks its identity keys. Specify --install-dir with the original deployment directory.\n' >&2; exit 1
   fi
