@@ -5,6 +5,7 @@ import json
 import logging
 import secrets
 import ssl
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -51,6 +52,7 @@ class Agent:
         self.catalog = []
         self.synced_at = 0.0
         self.status = "未连接云端"
+        self.tunnel_ready = None
         self.frp = None
         if role == "host":
             from .frp import FrpProcess
@@ -85,43 +87,79 @@ class Agent:
         self, cloud_url: str, code: str, name: str, development=False, allow_insecure_http=False,
         replace_client=False,
     ):
-        if self.settings.data.get("device_id") and not (replace_client and self.role == "client"):
+        recovering = str(code).count(".") == 2
+        if self.settings.data.get("device_id") and not recovering and not (replace_client and self.role == "client"):
             raise ValueError(
                 "Device already enrolled. Revoke it in the cloud and use a new profile to re-enroll."
             )
         cloud_url = validate_cloud_url(cloud_url, development, allow_insecure_http)
-        payload = {"code": code, "name": name}
-        if self.role == "host":
-            payload["csr"] = make_csr(self.settings.home, "pending-host")
-        async with self.cloud_http() as client:
-            response = await client.post(cloud_url + "/api/devices/enroll", json=payload, timeout=20)
-            response.raise_for_status()
-            result = response.json()
-        if result["role"] != self.role:
-            raise ValueError("Enrollment code role does not match this agent")
-        self.vault.update(refresh_token=result["refresh_token"])
-        fields = ["device_id", "role", "signing_public_key"]
-        if self.role == "host":
-            self.vault.update(frp_secret=result["frp_secret"])
-            fields.extend(["remote_port", "frp_server", "frp_port"])
-        self.settings.data.update({field: result[field] for field in fields})
-        self.settings.data.update(
-            cloud_url=cloud_url, name=name, development=development, allow_insecure_http=allow_insecure_http
-        )
-        self.settings.save()
-        if self.role == "host" and result.get("certificate"):
-            from .frp import write_frpc
+        if recovering and self.settings.data.get("signing_public_key"):
+            try:
+                claims = verify_token(code, self.settings.data["signing_public_key"], cloud_url, "device-recovery")
+            except HTTPException as error:
+                raise ValueError("恢复码无效或已过期，请在云端该设备行重新生成。") from error
+            if claims.get("kind") != "recover" or claims.get("role") != self.role:
+                raise ValueError("恢复码的设备角色不匹配。")
+        payload = {"code": code, "name": name, "role": self.role}
+        if recovering and cloud_url == self.settings.data.get("cloud_url"):
+            payload["old_refresh_token"] = self.vault.read().get("refresh_token", "")
+        with tempfile.TemporaryDirectory(prefix=".enroll-", dir=self.settings.home) as temporary:
+            staged = Path(temporary)
+            if self.role == "host":
+                payload["csr"] = make_csr(staged, "pending-host")
+            endpoint = "/api/devices/recover" if recovering else "/api/devices/enroll"
+            async with self.cloud_http() as client:
+                response = await client.post(cloud_url + endpoint, json=payload, timeout=20)
+                if recovering and response.status_code == 404:
+                    raise ValueError("云端尚不支持设备恢复，请先更新云端到最新版本。")
+                response.raise_for_status()
+                result = response.json()
+            if result["role"] != self.role:
+                raise ValueError("Enrollment code role does not match this agent")
+            secrets_update = {"refresh_token": result["refresh_token"], "refresh_request_id": "", "refresh_request_hash": ""}
+            fields = ["device_id", "role", "signing_public_key"]
+            if self.role == "host":
+                self.save_host_certificate(staged, result)
+                secrets_update["frp_secret"] = result["frp_secret"]
+                fields.extend(["remote_port", "frp_server", "frp_port"])
+            self.vault.update(**secrets_update)
+            self.settings.data.update({field: result[field] for field in fields})
+            self.settings.data.update(
+                cloud_url=cloud_url, name=name, development=development, allow_insecure_http=allow_insecure_http
+            )
+            self.settings.save()
+            if self.role == "host":
+                from .frp import write_frpc
 
-            atomic_write(self.settings.home / "ca.crt", result["ca"])
-            atomic_write(self.settings.home / "device.crt", result["certificate"])
-            write_frpc(self.settings, self.vault.read())
+                write_frpc(self.settings, self.vault.read())
         secure_windows_directory(self.settings.home)
+
+    def save_host_certificate(self, staged: Path, result: dict):
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+
+        cert = x509.load_pem_x509_certificate(result["certificate"].encode())
+        ca = x509.load_pem_x509_certificate(result["ca"].encode())
+        key = serialization.load_pem_private_key((staged / "device.key").read_bytes(), None)
+        encoding, format_ = serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+        if cert.public_key().public_bytes(encoding, format_) != key.public_key().public_bytes(encoding, format_):
+            raise ValueError("Cloud certificate does not match the requested key")
+        cert.verify_directly_issued_by(ca)
+        atomic_write(self.settings.home / "device.key", (staged / "device.key").read_bytes())
+        atomic_write(self.settings.home / "ca.crt", result["ca"])
+        atomic_write(self.settings.home / "device.crt", result["certificate"])
 
     async def reconnect_client(self, cloud_url: str, code: str, name: str, allow_insecure_http=False):
         if self.role != "client":
             raise ValueError("Only client profiles support this recovery operation")
+        return await self.reconnect(cloud_url, code, name, allow_insecure_http)
+
+    async def reconnect(self, cloud_url: str, code: str, name: str, allow_insecure_http=False):
+        recovering = str(code).count(".") == 2
+        if self.role == "host" and not recovering:
+            raise ValueError("请在云端这台主机的设备行生成恢复码，以保留已发布服务和授权。")
         async with self.connection_lock:
-            if self.settings.data.get("device_id") and self.vault.read().get("refresh_token"):
+            if not recovering and self.settings.data.get("device_id") and self.vault.read().get("refresh_token"):
                 try:
                     await self.api("GET", "/api/catalog")
                 except httpx.HTTPStatusError as error:
@@ -132,21 +170,44 @@ class Agent:
             async with self.refresh_lock:
                 # A failed code exchange leaves the existing profile intact.
                 # No new credentials can race a background refresh during replacement.
-                await self.enroll(
-                    cloud_url, code, name, bool(self.settings.data.get("development")),
-                    allow_insecure_http, replace_client=True,
-                )
+                if self.frp is not None:
+                    await self.frp.stop()
+                try:
+                    await self.enroll(
+                        cloud_url, code, name, bool(self.settings.data.get("development")),
+                        allow_insecure_http, replace_client=True,
+                    )
+                except Exception:
+                    if self.frp is not None and not self.settings.data.get("disable_frp", False):
+                        await self.frp.start()
+                    raise
+                for actor in list(self.actors.values()):
+                    await actor.close()
+                self.actors.clear()
                 self.access = ""
                 self.access_expires = 0
                 self.resource_tokens.clear()
                 self.catalog = []
                 self.synced_at = 0
+                self.published.clear()
             try:
                 await self._tick()
             except Exception as error:
                 self.status = "连接失败：" + type(error).__name__
                 return {"ok": True, "synced": False, "message": "新登记已保存，但同步失败。请检查网络后点击立即同步。"}
-            return {"ok": True, "synced": True, "message": "已重新登记并同步，本机映射和导出设置已保留。"}
+            if self.role == "host" and not self.settings.data.get("disable_frp", False):
+                self.tunnel_ready = False
+                for _ in range(8):
+                    try:
+                        self.tunnel_ready = bool((await self.api("GET", "/api/hosts/me/ready"))["ready"])
+                        break
+                    except httpx.HTTPError:
+                        await asyncio.sleep(1)
+                if not self.tunnel_ready:
+                    return {"ok": True, "synced": True, "tunnel_ready": False,
+                            "message": "登记已恢复，但主机隧道尚未就绪。请检查 frpc.log 与云端状态，再检测工具。"}
+            return {"ok": True, "synced": True, "tunnel_ready": self.tunnel_ready,
+                    "message": "已恢复登记并同步，本机服务、映射和导出设置已保留。"}
 
     async def cloud_access(self):
         async with self.refresh_lock:
@@ -157,13 +218,18 @@ class Agent:
             )
             if self.access and self.access_expires > time.time() + 30:
                 return self.access
-            refresh = self.vault.read().get("refresh_token")
+            stored = self.vault.read()
+            refresh = stored.get("refresh_token")
             if not refresh:
                 raise ValueError("Agent is not enrolled")
+            request_id = stored.get("refresh_request_id")
+            if not request_id or stored.get("refresh_request_hash") != digest(refresh):
+                request_id = secrets.token_urlsafe(32)
+                self.vault.update(refresh_request_id=request_id, refresh_request_hash=digest(refresh))
             async with self.cloud_http() as client:
                 response = await client.post(
                     self.settings.data["cloud_url"] + "/api/token",
-                    json={"refresh_token": refresh},
+                    json={"refresh_token": refresh, "request_id": request_id},
                     timeout=20,
                 )
                 response.raise_for_status()
@@ -177,7 +243,7 @@ class Agent:
             if claims["sub"] != self.settings.data["device_id"] or claims.get("kind") != "device":
                 raise ValueError("Cloud returned credentials for a different device")
             # Persist the rotated secret before making another request.
-            self.vault.update(refresh_token=data["refresh_token"])
+            self.vault.update(refresh_token=data["refresh_token"], refresh_request_id="", refresh_request_hash="")
             self.access = data["access_token"]
             self.access_expires = time.time() + data["expires_in"]
             return self.access
@@ -244,12 +310,16 @@ class Agent:
 
             certificate = x509.load_pem_x509_certificate((self.settings.home / "device.crt").read_bytes())
             if certificate.not_valid_after_utc.timestamp() < time.time() + 7 * 86400:
-                result = await self.api(
-                    "POST",
-                    "/api/devices/certificate",
-                    json={"csr": make_csr(self.settings.home, self.settings.data["device_id"])},
-                )
-                atomic_write(self.settings.home / "device.crt", result["certificate"])
+                with tempfile.TemporaryDirectory(prefix=".renew-", dir=self.settings.home) as temporary:
+                    staged = Path(temporary)
+                    result = await self.api(
+                        "POST", "/api/devices/certificate",
+                        json={"csr": make_csr(staged, self.settings.data["device_id"])},
+                    )
+                    self.save_host_certificate(staged, {
+                        "certificate": result["certificate"],
+                        "ca": (self.settings.home / "ca.crt").read_text(encoding="utf-8"),
+                    })
                 # The adapter's TLS context is refreshed by the CLI supervisor.
                 self.settings.data["certificate_revision"] = time.time()
                 self.settings.save()
@@ -465,6 +535,7 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
             "frp_running": bool(
                 agent.frp is not None and agent.frp.process and agent.frp.process.returncode is None
             ),
+            "tunnel_ready": agent.tunnel_ready,
             "port": agent.port,
             "subscribe_all": bool(agent.settings.data.get("subscribe_all")),
             "adapter_processes": len(agent.actors),
@@ -478,6 +549,11 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         local_user(request)
         body = await request.json()
         try:
+            if str(body.get("code", "")).count(".") == 2:
+                return await agent.reconnect(
+                    body.get("cloud_url", ""), body.get("code", ""), body.get("name", "Device"),
+                    bool(body.get("allow_insecure_http", agent.settings.data.get("allow_insecure_http", False))),
+                )
             await agent.enroll(
                 body.get("cloud_url", ""),
                 body.get("code", ""),
@@ -510,11 +586,9 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
     @app.post("/api/reconnect")
     async def reconnect(request: Request):
         local_user(request)
-        if agent.role != "client":
-            raise HTTPException(403, "Client role required")
         body = await request.json()
         try:
-            return await agent.reconnect_client(
+            return await agent.reconnect(
                 body.get("cloud_url", ""), body.get("code", ""), body.get("name", "Device"),
                 bool(body.get("allow_insecure_http", agent.settings.data.get("allow_insecure_http", False))),
             )
@@ -793,6 +867,11 @@ class HostAdapter:
         agent = self.agent
         try:
             sid = request.url.path.removeprefix("/mcp/")
+            # This adapter listener requires mTLS. The gateway checks the
+            # enrolled identity here before reporting host recovery ready.
+            if request.url.path == "/healthz" and request.method == "GET":
+                await JSONResponse({"device_id": agent.settings.data.get("device_id")})(scope, receive, send)
+                return
             if request.url.path != "/mcp/" + sid or not sid.startswith("srv_") or "/" in sid:
                 raise HTTPException(404, "Unknown route")
             ticket = verify_token(

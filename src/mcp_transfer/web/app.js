@@ -81,9 +81,9 @@ async function overview(main) {
     main.append(panel("云端连接状态", el("div", { class: "row spread" }, el("div", {}, badge(status.status, status.status === "已连接"), el("p", {}, status.cloud_url || "尚未连接云端"), el("code", {}, status.device_id || "待登记设备")), action("立即同步", async () => { await api("/api/sync", "POST", {}); await render(); }, "primary")), el("p", { class: "small muted" }, "“已连接”表示设备与云端同步成功。请在 MCP 服务页检测工具，确认服务可用。")));
     if (!status.device_id) main.append(form("首次连接云端", [input("云端地址", "cloud_url", "url", "", "例如 https://mcp.example.com"), input("设备名称", "name", "text", state.role === "host" ? "我的 MCP 主机" : "我的工作电脑"), input("一次性接入码", "code", "password"), check("允许明文 HTTP（密码、Token 和调用内容没有传输加密）", "allow_insecure_http", status.allow_insecure_http)], "连接并登记", async data => { data.allow_insecure_http = data.allow_insecure_http === "on"; await api("/api/configure", "POST", data); toast("设备已登记"); await render(); }));
     else main.append(panel(state.role === "host" ? "发布你的 MCP 服务" : "把远程服务带到本机", el("p", {}, state.role === "host" ? "在 MCP 服务页添加 HTTP、stdio 或旧 SSE 服务。stdio 测试会启动配置的程序，导入的服务默认停用。" : "同步已授权目录后，可以一次订阅全部服务，生成应用配置。云端令牌由后台管理，不必填入 AI 应用。"), action(state.role === "host" ? "添加服务" : "查看可用服务", () => navigate("servers"), "primary")));
-    if (state.role === "client" && status.device_id) {
-      main.append(panel("重新接入云端", el("p", {}, "设备被撤销或凭证过期时，在云端生成新的客户端接入码，再在这里重新登记。保留本机映射和导出设置，访问权限会按新设备重新检查；指定给旧设备的授权需要在云端重新分配。"),
-        form("使用新的接入码", [input("云端地址", "cloud_url", "url", status.cloud_url || ""), input("设备名称", "name", "text", status.name || "我的工作电脑"), input("新的一次性接入码", "code", "password"), check("允许明文 HTTP", "allow_insecure_http", status.allow_insecure_http)], "重新登记并同步", async data => {
+    if (status.device_id) {
+      main.append(panel("恢复设备接入", el("p", {}, "在云端“设备与接入”找到这台设备，点击“生成恢复码”。恢复会替换旧凭证并停止当前连接，保留本机服务、映射和导出设置；主机的服务 ID 和服务授权会迁移到恢复后的设备。"),
+        form("输入设备恢复码", [input("云端地址", "cloud_url", "url", status.cloud_url || ""), input("设备名称", "name", "text", status.name || (state.role === "host" ? "我的 MCP 主机" : "我的工作电脑")), input("一次性恢复码", "code", "password"), check("允许明文 HTTP", "allow_insecure_http", status.allow_insecure_http)], "恢复接入并同步", async data => {
           data.allow_insecure_http = data.allow_insecure_http === "on";
           const result = await api("/api/reconnect", "POST", data); toast(result.message); await render();
         })));
@@ -151,7 +151,12 @@ async function devicesPage(main) {
     node.querySelector(".generated")?.remove();
     node.append(el("div", { class: "generated message" }, el("p", {}, "5 分钟内有效，仅可使用一次。请在对应角色的本地 WebUI 中登记。"), el("pre", {}, result.code), action("复制接入码", async () => { await navigator.clipboard.writeText(result.code); toast("已复制"); })));
   }));
-  main.append(table(["设备", "角色", "所属用户", "状态", "操作"], devices.map(x => [el("div", {}, x.name, el("div", { class: "small muted" }, x.id)), x.role, users.find(u => u.id === x.owner)?.username || x.owner, badge(!x.active ? "已撤销" : x.online ? "在线" : "离线", x.active && x.online), x.active ? action("撤销设备", async () => { if (!confirm(`撤销“${x.name}”的访问权限？已有流也会被关闭。`)) return; await api(`/api/devices/${x.id}/revoke`, "POST", {}); await render(); }, "danger") : "—"])));
+  const recoveryBox = el("div");
+  main.append(table(["设备", "角色", "所属用户", "状态", "操作"], devices.map(x => [el("div", {}, x.name, el("div", { class: "small muted" }, x.id)), x.role, users.find(u => u.id === x.owner)?.username || x.owner, badge(x.recovered_by ? "已恢复为新设备" : !x.active ? "已撤销" : x.online ? "在线" : "离线", x.active && x.online), el("div", { class: "row actions" }, x.recovered_by ? el("span", { class: "small break" }, `当前设备：${x.recovered_by}`) : action("生成恢复码", async () => {
+    const result = await api(`/api/devices/${x.id}/recovery-code`, "POST", {});
+    recoveryBox.replaceChildren(panel(`恢复 ${result.name}`, el("p", {}, "5 分钟有效、仅使用一次、绑定这台设备及其所属用户。将恢复码填到原设备 WebUI 的“恢复设备接入”。恢复成功后旧凭证失效，主机服务 ID 与服务授权保留。"), el("pre", { class: "break" }, result.code), action("复制恢复码", async () => { await navigator.clipboard.writeText(result.code); toast("已复制"); })));
+    recoveryBox.scrollIntoView({ behavior: "smooth" });
+  }), x.active ? action("撤销设备", async () => { if (!confirm(`撤销“${x.name}”的访问权限？已有流也会被关闭。`)) return; await api(`/api/devices/${x.id}/revoke`, "POST", {}); await render(); }, "danger") : null)])), recoveryBox);
 }
 
 async function grantsPage(main) {

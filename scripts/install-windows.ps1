@@ -10,6 +10,11 @@ $SourceRoot = Split-Path -Parent $PSScriptRoot
 $InstallRoot = Join-Path $env:LOCALAPPDATA "MCPTransfer\$Role"
 $RuntimeRoot = Join-Path $InstallRoot 'runtime'
 $DataRoot = Join-Path $InstallRoot 'data'
+$OriginalLocation = Get-Location
+try {
+New-Item -ItemType Directory -Force -Path $InstallRoot, $DataRoot | Out-Null
+Set-Location -LiteralPath $InstallRoot
+[System.Environment]::CurrentDirectory = $InstallRoot
 $Python = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python312\python.exe'
 if (-not (Test-Path $Python)) {
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw 'Install Python 3.12 from python.org, or enable Windows App Installer (winget), then retry.' }
@@ -30,8 +35,8 @@ foreach ($Item in Get-ChildItem -Force -LiteralPath $InstallRoot) {
     if ($LASTEXITCODE -ne 0) { throw 'Cannot propagate private installation permissions.' }
 }
 $TaskName = "MCPTransfer-$Role"
-$ExistingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-if ($ExistingTask) { Stop-ScheduledTask -TaskName $TaskName; Start-Sleep -Seconds 2 }
+. (Join-Path $PSScriptRoot 'windows-runtime.ps1')
+Stop-McpAgent -Role $Role -DataRoot $DataRoot
 if (-not (Test-Path (Join-Path $RuntimeRoot 'Scripts\python.exe'))) {
     & $Python -m venv $RuntimeRoot
     if ($LASTEXITCODE -ne 0) { throw 'Failed to create the Python environment.' }
@@ -44,7 +49,7 @@ if ($Role -eq 'host') {
     if ($LASTEXITCODE -ne 0) { throw 'frp download or checksum verification failed.' }
 }
 if ($Port -eq 0 -and (Test-Path (Join-Path $DataRoot 'settings.json'))) {
-    $SavedSettings = Get-Content -Raw -LiteralPath (Join-Path $DataRoot 'settings.json') | ConvertFrom-Json
+    $SavedSettings = Get-Content -Raw -Encoding UTF8 -LiteralPath (Join-Path $DataRoot 'settings.json') | ConvertFrom-Json
     if ($SavedSettings.PSObject.Properties.Name -contains 'ui_port') { $Port = [int]$SavedSettings.ui_port }
 }
 if ($Port -eq 0) { if ($Role -eq 'host') { $Port = 17810 } else { $Port = 17820 } }
@@ -74,3 +79,9 @@ $PasswordCmd = "@echo off`r`n`"%LOCALAPPDATA%\MCPTransfer\$Role\runtime\Scripts\
 Set-Content -Path (Join-Path $InstallRoot 'show-access-password.cmd') -Value $PasswordCmd -Encoding ASCII
 Start-Process "http://127.0.0.1:$Port"
 Write-Host 'In the WebUI, enter the cloud URL and the one-time enrollment code for this role.'
+} finally {
+    $ReturnPath = $env:TEMP
+    if ($OriginalLocation.Provider.Name -eq 'FileSystem' -and (Test-Path -LiteralPath $OriginalLocation.Path -PathType Container)) { $ReturnPath = $OriginalLocation.Path }
+    Set-Location -LiteralPath $ReturnPath
+    [System.Environment]::CurrentDirectory = $ReturnPath
+}

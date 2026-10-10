@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import ssl
 import sys
 from pathlib import Path
@@ -19,6 +20,7 @@ from .cloud import create_cloud, create_frp_plugin
 from .config import Settings, default_home, validate_cloud_url
 from .database import OAuthCode, User, WebSession, database
 from .protocol import mapped_client, proxy_server
+from .runtime_lock import profile_lock
 from .security import new_id, passwords
 from .vault import Vault
 
@@ -130,6 +132,16 @@ async def run_agent(settings: Settings, role: str, no_frp=False):
     settings.data["role"] = role
     settings.data["disable_frp"] = no_frp
     settings.save()
+    # Bind before the ASGI lifespan starts the heartbeat/refresh task. A stale
+    # process occupying the port must not cause a second credential rotation.
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind(("127.0.0.1", int(settings.data.get("ui_port", 17810 if role == "host" else 17820))))
+        listener.listen(socket.SOMAXCONN)
+        listener.setblocking(False)
+    except OSError:
+        listener.close()
+        raise ValueError("The local WebUI port is occupied. Stop the old agent or choose another port.") from None
     agent = Agent(settings, role)
     web = uvicorn.Server(
         uvicorn.Config(
@@ -174,13 +186,14 @@ async def run_agent(settings: Settings, role: str, no_frp=False):
         file=sys.stderr,
     )
     try:
-        await web.serve()
+        await web.serve(sockets=[listener])
     finally:
         monitor.cancel()
         await asyncio.gather(monitor, return_exceptions=True)
         if adapter_server:
             adapter_server.should_exit = True
             await adapter_task
+        listener.close()
 
 
 async def bridge(settings: Settings, sid: str):
@@ -243,15 +256,18 @@ def main():
         elif args.command == "cloud":
             asyncio.run(run_cloud(settings, args.no_frp))
         elif args.command in {"host", "client"}:
-            if args.port:
-                if not 1024 <= args.port <= 65535:
-                    raise ValueError("Port must be 1024–65535")
-                settings.data["ui_port"] = args.port
-            settings.data["development"] = args.development
-            if args.allow_insecure_http is not None:
-                settings.data["allow_insecure_http"] = args.allow_insecure_http
-            settings.save()
-            asyncio.run(run_agent(settings, args.command, args.no_frp))
+            with profile_lock(settings.home):
+                if settings.data.get("role") not in {None, args.command}:
+                    raise ValueError("A profile cannot be used as both host and client")
+                if args.port:
+                    if not 1024 <= args.port <= 65535:
+                        raise ValueError("Port must be 1024–65535")
+                    settings.data["ui_port"] = args.port
+                settings.data["development"] = args.development
+                if args.allow_insecure_http is not None:
+                    settings.data["allow_insecure_http"] = args.allow_insecure_http
+                settings.save()
+                asyncio.run(run_agent(settings, args.command, args.no_frp))
         elif args.command == "connect":
             asyncio.run(bridge(settings, args.server))
         elif args.command == "local-password":

@@ -83,11 +83,11 @@ async def test_live_registration_is_not_silently_replaced(cloud, tmp_path):
     await agent.close()
 
 
-def test_recovery_api_requires_local_auth_csrf_and_client_role(tmp_path):
+def test_recovery_api_requires_local_auth_and_csrf(tmp_path):
     agent = Agent(Settings(tmp_path / "host"), "host")
     with TestClient(create_agent_app(agent, background=False), base_url="http://127.0.0.1:17810") as client:
         assert client.post("/api/reconnect", json={}).status_code == 401
         login = client.post("/api/auth/login", json={"password": agent.vault.read()["local_password"]})
         assert client.post("/api/reconnect", json={}).status_code == 403
         client.headers["x-csrf-token"] = login.json()["csrf"]
-        assert client.post("/api/reconnect", json={}).status_code == 403
+        assert client.post("/api/reconnect", json={}).status_code == 400

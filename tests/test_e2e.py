@@ -258,3 +258,89 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
         await host.close()
         await agent.close()
         await frps.stop()
+
+
+@pytest.mark.skipif(os.environ.get("MCPT_E2E") != "1", reason="Real runtime and pinned frp integration")
+async def test_running_host_recovers_through_webui_with_its_services_and_tls_adapter(tmp_path, monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    public_port, host_ui, client_port = available_port(), available_port(), available_port()
+    cloud_settings = Settings(tmp_path / "cloud")
+    cloud_settings.data.update(frp_port=available_port(), plugin_port=available_port())
+    public = f"http://127.0.0.1:{public_port}"
+    initialize_cloud(cloud_settings, public, password="runtime-recovery-password-123", allow_insecure_http=True)
+    await download_frp(cloud_settings.home, "frps")
+    frps = FrpProcess(cloud_settings, "frps")
+    host_settings = Settings(tmp_path / "host")
+    host_settings.data.update(adapter_port=available_port(), ui_port=host_ui)
+    host = Agent(host_settings, "host")
+    await download_frp(host_settings.home, "frpc")
+    client_settings = Settings(tmp_path / "client")
+    client_settings.data["ui_port"] = client_port
+    client = Agent(client_settings, "client")
+    process = None
+    log = open(tmp_path / "runtime.log", "wb")
+    try:
+        async with serve(create_cloud(cloud_settings), public_port), serve(
+            create_frp_plugin(cloud_settings), cloud_settings.data["plugin_port"]
+        ):
+            async with httpx.AsyncClient(base_url=public, trust_env=False, timeout=60) as admin:
+                login = await admin.post("/api/auth/login", json={"username": "admin", "password": "runtime-recovery-password-123"})
+                admin.headers["x-csrf-token"] = login.json()["csrf"]
+                code = (await admin.post("/api/enrollment-codes", json={"role": "host"})).json()["code"]
+                await host.enroll(public, code, "旧主机", allow_insecure_http=True)
+                old_id = host_settings.data["device_id"]
+                host.vault.update(services={"srv_runtime": {
+                    "name": "legacy-demo", "transport": "stdio", "command": sys.executable,
+                    "args": [str(Path(__file__).parent / "fixtures/legacy_stdio_server.py")], "enabled": True,
+                }})
+                await frps.start()
+                process = await asyncio.create_subprocess_exec(
+                    sys.executable, "-X", "utf8=0", "-m", "mcp_transfer", "--home", str(host_settings.home),
+                    "host", "--port", str(host_ui), "--allow-insecure-http", stdout=log, stderr=log,
+                )
+                async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{host_ui}", trust_env=False, timeout=60) as local:
+                    for _ in range(120):
+                        if process.returncode is not None:
+                            raise AssertionError((tmp_path / "runtime.log").read_text(encoding="utf-8", errors="replace"))
+                        try:
+                            health = await local.get("/healthz")
+                            servers = await admin.get("/api/servers")
+                            if health.status_code == 200 and any(x["id"] == "srv_runtime" for x in servers.json()):
+                                break
+                        except httpx.HTTPError:
+                            pass
+                        await asyncio.sleep(0.1)
+                    else:
+                        raise AssertionError("Runtime did not publish its service")
+                    login = await local.post("/api/auth/login", json={"password": host.vault.read()["local_password"]})
+                    local.headers["x-csrf-token"] = login.json()["csrf"]
+                    code = (await admin.post("/api/enrollment-codes", json={"role": "client"})).json()["code"]
+                    await client.enroll(public, code, "Client", allow_insecure_http=True)
+                    await client.tick()
+                    client.subscribe(["srv_runtime"])
+                    assert (await admin.post(f"/api/devices/{old_id}/revoke")).status_code == 200
+                    code = (await admin.post(f"/api/devices/{old_id}/recovery-code")).json()["code"]
+                    result = await local.post("/api/reconnect", json={
+                        "cloud_url": public, "code": code, "name": "恢复主机", "allow_insecure_http": True,
+                    })
+                    assert result.status_code == 200, result.text
+                    assert result.json()["synced"] is True
+                    assert result.json()["tunnel_ready"] is True, result.text
+                    new_id = Settings(host_settings.home).data["device_id"]
+                    assert new_id != old_id
+                    server = (await admin.get("/api/servers")).json()[0]
+                    assert server["id"] == "srv_runtime" and server["host_id"] == new_id
+                    await client.tick()
+                    async with serve(create_agent_app(client, background=False), client_port):
+                        token = client.vault.read()["mappings"]["srv_runtime"]["token"]
+                        async with mapped_client(client_port, "srv_runtime", token) as peer:
+                            assert [tool.name for tool in (await peer.list_tools()).tools] == ["add"]
+                            assert "42" in (await peer.call_tool("add", {"a": 20, "b": 22})).model_dump_json()
+    finally:
+        if process and process.returncode is None:
+            process.terminate()
+            await asyncio.wait_for(process.wait(), 15)
+        log.close()
+        await host.close()
+        await client.close()
+        await frps.stop()

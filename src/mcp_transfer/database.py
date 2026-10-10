@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-from sqlalchemy import JSON, Boolean, Float, Integer, String, create_engine, event
+from sqlalchemy import JSON, Boolean, Float, Integer, String, create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -50,6 +50,7 @@ class ConsumedRefresh(Base):
     hash: Mapped[str] = mapped_column(String(64), primary_key=True)
     device_id: Mapped[str] = mapped_column(String(64), index=True)
     expires: Mapped[float] = mapped_column(Float)
+    request_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class Service(Base):
@@ -114,4 +115,11 @@ def database(url: str):
             connection.execute("PRAGMA busy_timeout=5000")
 
     Base.metadata.create_all(engine)
+    columns = {column["name"] for column in inspect(engine).get_columns("consumed_refresh_tokens")}
+    if "request_hash" not in columns:
+        with engine.begin() as connection:
+            suffix = " IF NOT EXISTS" if engine.dialect.name == "postgresql" else ""
+            connection.execute(text(
+                "ALTER TABLE consumed_refresh_tokens ADD COLUMN" + suffix + " request_hash VARCHAR(64)"
+            ))
     return sessionmaker(engine, expire_on_commit=False)
