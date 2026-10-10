@@ -6,6 +6,7 @@ import socket
 import ssl
 import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 import httpx2
@@ -60,8 +61,11 @@ async def serve(application, port, **kwargs):
     os.environ.get("MCPT_E2E") != "1",
     reason="Set MCPT_E2E=1 to download pinned frp and run real TLS integration",
 )
-@pytest.mark.parametrize("mode,public_http", [("auto", False), ("legacy", False), ("auto", True)])
-async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mode, public_http):
+@pytest.mark.parametrize("mode,public_http,old_upstream", [
+    ("auto", False, False), ("legacy", False, False), ("auto", True, False),
+    ("legacy", True, True),
+])
+async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mode, public_http, old_upstream):
     cloud_port, adapter_port, client_port = available_port(), available_port(), available_port()
     cloud_settings = Settings(tmp_path / "cloud")
     cloud_settings.data["frp_port"] = available_port()
@@ -144,7 +148,8 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
                             "name": "Demo",
                             "transport": "stdio",
                             "command": sys.executable,
-                            "args": ["-m", "mcp_transfer", "demo-server"],
+                            "args": ([str(Path(__file__).parent / "fixtures/legacy_stdio_server.py")]
+                                     if old_upstream else ["-m", "mcp_transfer", "demo-server"]),
                             "enabled": True,
                         }
                     }
@@ -181,6 +186,18 @@ async def test_real_frp_stdio_roundtrip_and_revocation(tmp_path, monkeypatch, mo
                     else:
                         raise AssertionError((host_settings.home / "frpc.log").read_text())
                     async with serve(create_agent_app(agent, background=False), client_port):
+                        async with httpx.AsyncClient(
+                            base_url=f"http://127.0.0.1:{client_port}", trust_env=False, timeout=45
+                        ) as local:
+                            login = await local.post("/api/auth/login", json={
+                                "password": agent.vault.read()["local_password"]
+                            })
+                            local.headers["x-csrf-token"] = login.json()["csrf"]
+                            check = await local.post("/api/servers/srv_demo/test", json={})
+                            assert check.status_code == 200, check.text
+                            assert check.json()["stage"] == "client_roundtrip"
+                            assert [tool["name"] for tool in check.json()["tools"]] == ["add"]
+                            assert check.json()["tool_count"] == 1
                         headers = {
                             "Authorization": "Bearer " + agent.vault.read()["mappings"]["srv_demo"]["token"],
                             "X-MCPT-Connection": "integration",

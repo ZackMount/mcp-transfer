@@ -65,6 +65,44 @@ def test_pythonw_agent_exports_console_python_for_stdio(tmp_path, monkeypatch):
     assert result["mcpServers"]["mcpt_srv_a"]["command"].endswith("python.exe")
 
 
+@pytest.mark.parametrize("target", ["cursor", "codex"])
+@pytest.mark.parametrize("mode", ["stdio", "http"])
+def test_named_exports_migrate_rename_and_remove_without_duplicates(tmp_path, target, mode):
+    mappings = {"srv_a": {"token": "local-only", "enabled": True}}
+    old = generate(target, ["srv_a"], tmp_path, mappings, 17820, mode)
+    named = generate(
+        target, ["srv_a"], tmp_path, mappings, 17820, mode, old,
+        server_names={"srv_a": "cheat-engine"},
+    )
+    group = (tomllib.loads(named)["mcp_servers"] if target == "codex"
+             else json.loads(named)["mcpServers"])
+    assert list(group) == ["mcpt_cheat-engine_srv_a"]
+    renamed = generate(
+        target, ["srv_a"], tmp_path, mappings, 17820, mode, named,
+        server_names={"srv_a": "new-name"},
+    )
+    assert "mcpt_cheat-engine_srv_a" not in renamed
+    assert "mcpt_new-name_srv_a" in renamed
+    revoked = generate(target, [], tmp_path, mappings, 17820, mode, renamed)
+    assert "mcpt_new-name_srv_a" not in revoked
+
+
+def test_duplicate_service_names_keep_distinct_identifiers(tmp_path):
+    config = json.loads(generate(
+        "cursor", ["srv_a", "srv_b"], tmp_path, {}, 17820,
+        server_names={"srv_a": "cheat-engine", "srv_b": "cheat-engine"},
+    ))
+    assert set(config["mcpServers"]) == {"mcpt_cheat-engine_srv_a", "mcpt_cheat-engine_srv_b"}
+
+
+def test_named_export_preserves_unrelated_entry_at_a_similar_local_url(tmp_path):
+    original = json.dumps({"mcpServers": {"mcpt_user_config": {
+        "url": "http://127.0.0.1:17820/mcp/srv_a"
+    }}})
+    result = json.loads(generate("cursor", [], tmp_path, {}, 17820, "http", original))
+    assert "mcpt_user_config" in result["mcpServers"]
+
+
 def test_manual_mapping_enable_does_not_undo_automatic_disable(tmp_path):
     agent = Agent(Settings(tmp_path), "client")
     agent.catalog = [{"id": "srv_a"}]

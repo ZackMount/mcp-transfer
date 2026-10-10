@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import httpx2
@@ -13,6 +14,8 @@ from mcp.client.stdio import StdioServerParameters
 from mcp.client.streamable_http import streamable_http_client
 from mcp.server import Server
 from mcp.shared.exceptions import MCPError
+from mcp_types.methods import CACHEABLE_METHODS
+from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import ConfigDict
 
 
@@ -22,6 +25,45 @@ class WireParams(types.RequestParams):
 
 class WireResult(types.Result):
     model_config = ConfigDict(extra="allow")
+
+
+@asynccontextmanager
+async def mapped_client(port: int, sid: str, token: str):
+    """Use the same authenticated loopback transport for diagnostics and stdio bridges."""
+    headers = {"Authorization": "Bearer " + token, "X-MCPT-Connection": uuid.uuid4().hex}
+    async with httpx2.AsyncClient(
+        headers=headers, trust_env=False, follow_redirects=False, timeout=httpx2.Timeout(30, read=None)
+    ) as http:
+        transport = streamable_http_client(f"http://127.0.0.1:{port}/mcp/{sid}", http_client=http)
+        async with Client(transport, cache=None) as client:
+            yield client
+
+
+async def inspect_tools(client: Client) -> dict:
+    tools = []
+    cursor = None
+    seen = set()
+    if client.server_capabilities.tools is not None:
+        for _ in range(100):
+            page = await client.list_tools(cursor=cursor)
+            tools.extend({"name": tool.name, "description": tool.description or ""} for tool in page.tools)
+            cursor = page.next_cursor
+            if not cursor:
+                break
+            if cursor in seen:
+                raise ValueError("Upstream repeated a tools pagination cursor")
+            seen.add(cursor)
+        else:
+            raise ValueError("Tools pagination exceeds diagnostic limit")
+    info = client.server_info
+    return {
+        "ok": True,
+        "version": client.protocol_version,
+        "server_name": info.name if info else "",
+        "capabilities": client.server_capabilities.model_dump(by_alias=True, exclude_none=True),
+        "tool_count": len(tools),
+        "tools": tools,
+    }
 
 
 @asynccontextmanager
@@ -93,6 +135,13 @@ def proxy_server(client: Client, name: str) -> Server:
                         code=-32601, message="Interactive client capabilities are disabled for this adapter"
                     )
                 )
+            # Older upstreams omit this envelope field. The modern downstream
+            # validates it before the SDK's default response stamping runs.
+            if ctx.protocol_version in MODERN_PROTOCOL_VERSIONS:
+                dumped.setdefault("resultType", "complete")
+                if method in CACHEABLE_METHODS:
+                    dumped.setdefault("ttlMs", 0)
+                    dumped.setdefault("cacheScope", "private")
             return dumped
 
         server.add_request_handler(method, WireParams, handler)

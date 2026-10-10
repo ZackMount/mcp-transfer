@@ -3,6 +3,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import shutil
 import sys
 from datetime import UTC, datetime
@@ -39,6 +40,7 @@ def generate(
     port: int,
     mode: str = "stdio",
     existing: str = "",
+    server_names: dict[str, str] | None = None,
 ) -> str:
     if target not in TARGETS or mode not in {"stdio", "http"}:
         raise ValueError("Unknown export format or mode")
@@ -57,7 +59,11 @@ def generate(
         if not isinstance(document, dict):
             raise ValueError("Configuration root must be an object")
         group = document.setdefault("servers" if target == "vscode" else "mcpServers", {})
-    desired_names = {"mcpt_" + sid for sid in server_ids}
+    def export_name(sid):
+        label = re.sub(r"[^a-zA-Z0-9_-]+", "-", (server_names or {}).get(sid, ""))[:48].strip("-_")
+        return f"mcpt_{label}_{sid}" if label else "mcpt_" + sid
+
+    desired_names = {export_name(sid) for sid in server_ids}
     # Only remove entries that actually launch our bridge, never arbitrary similarly named entries.
     for key in list(group):
         item = group[key]
@@ -68,11 +74,15 @@ def generate(
             and "connect" in item.get("args", [])
         )
         if key.startswith("mcpt_") and hasattr(item, "get"):
-            ours = ours or item.get("url") == f"http://127.0.0.1:{port}/mcp/{key.removeprefix('mcpt_')}"
+            url = item.get("url", "")
+            match = re.fullmatch(
+                rf"http://127\.0\.0\.1:{port}/mcp/(srv_[a-zA-Z0-9_-]+)", url
+            ) if isinstance(url, str) else None
+            ours = ours or bool(match and key.endswith("_" + match.group(1)))
         if ours and key not in desired_names:
             del group[key]
     for sid in server_ids:
-        name = "mcpt_" + sid
+        name = export_name(sid)
         if mode == "stdio":
             executable = sys.executable
             if Path(executable).name.lower() == "pythonw.exe":
@@ -106,10 +116,13 @@ def generate(
     )
 
 
-def export_preview(target: str, server_ids: list[str], home: Path, mappings: dict, port: int, mode: str):
+def export_preview(
+    target: str, server_ids: list[str], home: Path, mappings: dict, port: int, mode: str,
+    server_names: dict[str, str] | None = None,
+):
     path = Path(application_paths()[target])
     existing = path.read_text(encoding="utf-8-sig") if path.exists() else ""
-    content = generate(target, server_ids, home, mappings, port, mode, existing)
+    content = generate(target, server_ids, home, mappings, port, mode, existing, server_names)
     diff = "".join(
         difflib.unified_diff(
             existing.splitlines(True), content.splitlines(True), fromfile=str(path), tofile=str(path)

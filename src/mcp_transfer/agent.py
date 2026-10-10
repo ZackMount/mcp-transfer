@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import secrets
 import ssl
 import time
@@ -20,7 +21,7 @@ from .exporters import TARGETS, application_paths, export_preview, write_export
 from .http_support import REQUEST_HEADERS, relay_response
 from .pki import make_csr
 from .policy import authorize_message, parse_message
-from .protocol import Actor, upstream_client
+from .protocol import Actor, inspect_tools, mapped_client, upstream_client
 from .security import (
     BoundaryMiddleware,
     RateLimiter,
@@ -240,7 +241,10 @@ class Agent:
             for target, mode in self.settings.data.get("auto_exports", {}).items():
                 ids = self.active_mapping_ids()
                 mappings = self.vault.read().get("mappings", {})
-                preview = export_preview(target, ids, self.settings.home, mappings, self.port, mode)
+                preview = export_preview(
+                    target, ids, self.settings.home, mappings, self.port, mode,
+                    {item["id"]: item["name"] for item in self.catalog},
+                )
                 if preview["diff"]:
                     write_export(preview)
         self.status = "已连接"
@@ -593,20 +597,29 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
     @app.post("/api/servers/{sid}/test")
     async def test_server(sid: str, request: Request):
         local_user(request)
-        if agent.role != "host":
-            raise HTTPException(403, "Host role required")
-        definition = agent.vault.read().get("services", {}).get(sid)
-        if not definition:
-            raise HTTPException(404, "Service not found")
+        if agent.role == "host":
+            definition = agent.vault.read().get("services", {}).get(sid)
+            if not definition:
+                raise HTTPException(404, "Service not found")
+            context = upstream_client(definition)
+        else:
+            mapping = agent.vault.read().get("mappings", {}).get(sid)
+            if not mapping or not mapping.get("enabled", True):
+                raise HTTPException(400, "请先启用此服务的本地映射")
+            if sid not in {item["id"] for item in agent.catalog}:
+                raise HTTPException(403, "此服务不在已授权目录中，请先同步")
+            context = mapped_client(agent.port, sid, mapping["token"])
         try:
-            async with asyncio.timeout(30), upstream_client(definition) as client:
-                return {
-                    "ok": True,
-                    "version": client.protocol_version,
-                    "capabilities": client.server_capabilities.model_dump(by_alias=True, exclude_none=True),
-                }
+            async with asyncio.timeout(30), context as client:
+                result = await inspect_tools(client)
+                result["stage"] = "host_upstream" if agent.role == "host" else "client_roundtrip"
+                return result
         except Exception as error:
-            raise HTTPException(502, "MCP startup/test failed: " + type(error).__name__) from error
+            logging.exception("MCP diagnostic failed: role=%s server=%s", agent.role, sid)
+            stage = "主机本地 MCP" if agent.role == "host" else "客户端 → 云端 → 主机 MCP"
+            raise HTTPException(
+                502, stage + "检测失败（" + type(error).__name__ + "），请查看本机 data/agent.log 与云端调用审计"
+            ) from error
 
     @app.post("/api/subscribe")
     async def subscribe(request: Request):
@@ -635,7 +648,10 @@ def create_agent_app(agent: Agent, background=True) -> FastAPI:
         ids = agent.active_mapping_ids()
         mappings = agent.vault.read().get("mappings", {})
         try:
-            result = export_preview(target, ids, agent.settings.home, mappings, agent.port, mode)
+            result = export_preview(
+                target, ids, agent.settings.home, mappings, agent.port, mode,
+                {item["id"]: item["name"] for item in agent.catalog},
+            )
         except (ValueError, OSError) as error:
             raise HTTPException(400, str(error)) from error
         key = secrets.token_urlsafe(24)

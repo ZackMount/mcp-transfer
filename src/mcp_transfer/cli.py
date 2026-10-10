@@ -8,13 +8,9 @@ import os
 import secrets
 import ssl
 import sys
-import uuid
 from pathlib import Path
 
-import httpx2
 import uvicorn
-from mcp import Client
-from mcp.client.streamable_http import streamable_http_client
 from mcp.server.stdio import stdio_server
 from sqlalchemy import delete, select
 
@@ -22,7 +18,7 @@ from .agent import Agent, HostAdapter, create_agent_app
 from .cloud import create_cloud, create_frp_plugin
 from .config import Settings, default_home, validate_cloud_url
 from .database import OAuthCode, User, WebSession, database
-from .protocol import proxy_server
+from .protocol import mapped_client, proxy_server
 from .security import new_id, passwords
 from .vault import Vault
 
@@ -192,15 +188,11 @@ async def bridge(settings: Settings, sid: str):
     if not mapping or not mapping.get("enabled", True):
         raise ValueError("Server is not mapped. Enable it in the Client WebUI first.")
     port = int(settings.data.get("ui_port", 17820))
-    headers = {"Authorization": "Bearer " + mapping["token"], "X-MCPT-Connection": uuid.uuid4().hex}
-    async with httpx2.AsyncClient(
-        headers=headers, trust_env=False, follow_redirects=False, timeout=httpx2.Timeout(30, read=None)
-    ) as http:
-        transport = streamable_http_client(f"http://127.0.0.1:{port}/mcp/{sid}", http_client=http)
-        async with Client(transport, cache=None) as client:
-            server = proxy_server(client, "MCP Transfer " + sid)
-            async with stdio_server() as (read, write):
-                await server.run(read, write, server.create_initialization_options())
+    async with mapped_client(port, sid, mapping["token"]) as client:
+        upstream_name = client.server_info.name if client.server_info else sid
+        server = proxy_server(client, upstream_name)
+        async with stdio_server() as (read, write):
+            await server.run(read, write, server.create_initialization_options())
 
 
 def main():
